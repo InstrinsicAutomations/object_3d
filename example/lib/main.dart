@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:math' as math;
-import 'package:vector_math/vector_math.dart' show Vector3;
+import 'package:vector_math/vector_math_64.dart' show Vector3;
 import 'package:object_3d/object_3d.dart';
 
 void main() {
@@ -58,9 +58,9 @@ class _MyHomePageState extends State<MyHomePage> {
       ),
       body: Center(
         child: Object3D(
-          size: const Size(400.0, 400.0),
+          view: Frustum(Size(400, 400), 0.1, 1000),
           path: "assets/file.obj",
-          //  faceColorFunc: _fresnel, // uncomment to see in action
+          faceColorFunc: _fresnel, // uncomment to see in action
         ),
       ),
     );

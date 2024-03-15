@@ -6,8 +6,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:vector_math/vector_math.dart' as vmath;
-import 'package:vector_math/vector_math.dart' show Vector3;
+import 'package:vector_math/vector_math_64.dart' show Vector3, Matrix4;
 
 typedef FaceColorFunc = Face Function(Face face);
 
@@ -66,10 +65,44 @@ class Face {
   }
 }
 
+class Frustum {
+  Matrix4 mat = Matrix4.identity();
+  Size bounds;
+  double zoom = 0.0;
+  bool _redraw = true;
+
+  Frustum(this.bounds, double near, double far) {
+    final near2 = 2 * near;
+    final height2 = 2 * bounds.height;
+    final width2 = 2 * bounds.width;
+    final farSubNear = far - near;
+
+    mat[0] = near2 / width2;
+    mat[5] = near2 / height2;
+    mat[10] = -(far + near) / farSubNear;
+    mat[11] = -1.0;
+    mat[14] = (-far * near2) / farSubNear;
+    mat[15] = 0.0;
+  }
+
+  void redraw() {
+    _redraw = true;
+  }
+
+  bool get needsRedraw {
+    if (_redraw) {
+      _redraw = false;
+      return true;
+    }
+
+    return false;
+  }
+}
+
 class Object3D extends StatefulWidget {
   const Object3D({
     super.key,
-    required this.size,
+    required this.view,
     this.color = Colors.white,
     this.object,
     this.path,
@@ -100,7 +133,7 @@ class Object3D extends StatefulWidget {
           'Parameter maxSpeed must be positive, non-zero real number.',
         );
 
-  final Size size;
+  final Frustum view;
   final String? path;
   final String? object;
   final Color color;
@@ -119,7 +152,7 @@ class _Object3DState extends State<Object3D> {
   double _pitch = 15.0, _yaw = 45.0;
   double? _previousX, _previousY;
   double _deltaX = 0.0, _deltaY = 0.0;
-  List<Vector3> vertices = <vmath.Vector3>[];
+  List<Vector3> vertices = <Vector3>[];
   List<List<int>> faces = <List<int>>[];
   late Timer _updateTimer;
 
@@ -133,9 +166,14 @@ class _Object3DState extends State<Object3D> {
       _parseObj(widget.object!);
     }
 
-    _updateTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+    _updateTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
       if (!mounted) return;
       setState(() {
+        // TODO: remove later
+        widget.view.zoom =
+            (1.0 + math.cos((timer.tick * math.pi) / 180.0) * 0.25) * 100;
+        widget.view.redraw();
+
         final adx = _deltaX.abs();
         final ady = _deltaY.abs();
         final sx = _deltaX < 0 ? -1 : 1;
@@ -160,7 +198,7 @@ class _Object3DState extends State<Object3D> {
 
   /// Parse the object file.
   void _parseObj(String obj) {
-    final vertices = <vmath.Vector3>[];
+    final vertices = <Vector3>[];
     final faces = <List<int>>[];
     final lines = obj.split('\n');
     for (var line in lines) {
@@ -220,16 +258,15 @@ class _Object3DState extends State<Object3D> {
       onPanUpdate: _handlePanDelta,
       onPanEnd: _handlePanEnd,
       child: CustomPaint(
-        size: widget.size,
+        size: widget.view.bounds,
         painter: _ObjectPainter(
-          size: widget.size,
+          view: widget.view,
           pitch: _pitch,
           yaw: _yaw,
           roll: 0,
           vertices: vertices,
           color: widget.color,
           faces: faces,
-          zoom: 200,
           faceColorFunc: widget.faceColorFunc,
         ),
       ),
@@ -238,38 +275,38 @@ class _Object3DState extends State<Object3D> {
 }
 
 class _ObjectPainter extends CustomPainter {
-  final Size size;
-  final double zoom, pitch, yaw, roll;
-  late final double _viewPortX = size.width / 2;
-  late final double _viewPortY = size.height / 2;
+  final double pitch, yaw, roll;
 
   final Color color;
 
   final List<Vector3> vertices;
   final List<List<int>> faces;
 
-  final vmath.Vector3 camera = Vector3(0.0, 0.0, 0.0);
-  final vmath.Vector3 light = Vector3(0.0, 0.0, 100.0).normalized();
+  final Frustum view;
+  final Vector3 light = Vector3(0.0, 0.0, 100.0).normalized();
 
   final FaceColorFunc? faceColorFunc;
 
   _ObjectPainter({
-    required this.size,
+    required this.view,
     required this.pitch,
     required this.yaw,
     required this.roll,
     required this.vertices,
     required this.color,
     required this.faces,
-    required this.zoom,
     this.faceColorFunc,
   });
 
-  /// Calculate the position of a vertex in the 3D space based
-  /// on the angle of rotation, view-port position and zoom.
+  /// Calculate the position of a vertex in the 3D space
   Vector3 _calcVertex(Vector3 vertex) {
-    final t = vmath.Matrix4.translationValues(_viewPortX, _viewPortY, 0);
-    t.scale(zoom, -zoom);
+    // TODO: replace with ModelView matrix
+    final t = Matrix4.translationValues(
+      view.bounds.width * 0.5,
+      view.bounds.height * 0.5,
+      400.0 + view.zoom,
+    );
+    t.scale(100.0, -100.0); // TODO: remove after testing
     t.rotateX(_degreeToRadian(pitch));
     t.rotateY(_degreeToRadian(yaw));
     t.rotateZ(_degreeToRadian(roll));
@@ -285,15 +322,36 @@ class _ObjectPainter extends CustomPainter {
   List<Offset> _drawFace(List<Vector3> vertices, List<int> face) {
     final coordinates = <Offset>[];
     for (var i = 0; i < face.length; i++) {
-      double x, y;
+      double x, y, z;
       if (i < face.length - 1) {
-        final iV = vertices[face[i + 1] - 1];
-        x = iV.x.toDouble();
-        y = iV.y.toDouble();
+        final ref = vertices[face[i + 1] - 1];
+        final iV = ref.clone(); // view.mat.perspectiveTransform(ref.clone());
+        final norm = iV.normalized();
+
+        z = 1.0;
+        z = norm.z.toDouble();
+        if (z == 0) {
+          z = 1.0;
+        } else {
+          z = 1.0 / z;
+        }
+        x = iV.x.toDouble() * z;
+        y = iV.y.toDouble() * z;
       } else {
-        final iV = vertices[face[0] - 1];
-        x = iV.x.toDouble();
-        y = iV.y.toDouble();
+        final ref = vertices[face[0] - 1];
+        final iV = ref.clone(); // view.mat.perspectiveTransform(ref.clone());
+        final norm = iV.normalized();
+
+        z = 1.0;
+        z = norm.z.toDouble();
+
+        if (z == 0) {
+          z = 1.0;
+        } else {
+          z = 1.0 / z;
+        }
+        x = iV.x.toDouble() * z;
+        y = iV.y.toDouble() * z;
       }
       coordinates.add(Offset(x, y));
     }
@@ -333,7 +391,7 @@ class _ObjectPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     // Calculate the position of the vertices in the 3D space.
-    final verticesToDraw = <vmath.Vector3>[];
+    final verticesToDraw = <Vector3>[];
     for (final vertex in vertices) {
       final defV = _calcVertex(Vector3.copy(vertex));
       verticesToDraw.add(defV);
@@ -383,7 +441,8 @@ class _ObjectPainter extends CustomPainter {
       old.pitch != pitch ||
       old.yaw != yaw ||
       old.roll != roll ||
-      old.zoom != zoom;
+      old.view != view ||
+      view.needsRedraw;
 }
 
 class AvgZ {
