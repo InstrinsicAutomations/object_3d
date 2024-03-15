@@ -57,8 +57,8 @@ class Face {
     if (_cachedNormal != null) return Vector3.copy(_cachedNormal!);
 
     // Normal needs recalculating
-    final p = Vector3.copy(_v2)..sub(_v1);
-    final q = Vector3.copy(_v2)..sub(_v3);
+    final Vector3 p = Vector3.copy(_v2)..sub(_v1);
+    final Vector3 q = Vector3.copy(_v2)..sub(_v3);
     _cachedNormal = p.cross(q).normalized();
 
     return Vector3.copy(_cachedNormal!);
@@ -72,10 +72,10 @@ class Frustum {
   bool _redraw = true;
 
   Frustum(this.bounds, double near, double far) {
-    final near2 = 2 * near;
-    final height2 = 2 * bounds.height;
-    final width2 = 2 * bounds.width;
-    final farSubNear = far - near;
+    final double near2 = 2 * near;
+    final double height2 = 2 * bounds.height;
+    final double width2 = 2 * bounds.width;
+    final double farSubNear = far - near;
 
     mat[0] = near2 / width2;
     mat[5] = near2 / height2;
@@ -101,8 +101,8 @@ class Frustum {
 
 class Object3D extends StatefulWidget {
   const Object3D({
-    super.key,
     required this.view,
+    super.key,
     this.color = Colors.white,
     this.object,
     this.path,
@@ -166,18 +166,14 @@ class _Object3DState extends State<Object3D> {
       _parseObj(widget.object!);
     }
 
-    _updateTimer = Timer.periodic(const Duration(milliseconds: 16), (timer) {
+    _updateTimer =
+        Timer.periodic(const Duration(milliseconds: 16), (Timer timer) {
       if (!mounted) return;
       setState(() {
-        // TODO: remove later
-        widget.view.zoom =
-            (1.0 + math.cos((timer.tick * math.pi) / 180.0) * 0.25) * 100;
-        widget.view.redraw();
-
-        final adx = _deltaX.abs();
-        final ady = _deltaY.abs();
-        final sx = _deltaX < 0 ? -1 : 1;
-        final sy = _deltaY < 0 ? -1 : 1;
+        final double adx = _deltaX.abs();
+        final double ady = _deltaY.abs();
+        final int sx = _deltaX < 0 ? -1 : 1;
+        final int sy = _deltaY < 0 ? -1 : 1;
 
         _deltaX = math.min(widget.maxSpeed, adx) * sx * widget.dampCoef;
         _deltaY = math.min(widget.maxSpeed, ady) * sy * widget.dampCoef;
@@ -198,16 +194,18 @@ class _Object3DState extends State<Object3D> {
 
   /// Parse the object file.
   void _parseObj(String obj) {
-    final vertices = <Vector3>[];
-    final faces = <List<int>>[];
-    final lines = obj.split('\n');
-    for (var line in lines) {
-      const space = ' ';
+    final List<Vector3> vertices = <Vector3>[];
+    final List<List<int>> faces = <List<int>>[];
+    final List<String> lines = obj.split('\n');
+    for (String line in lines) {
+      const String space = ' ';
       line = line.replaceAll(RegExp(r'\s+'), space);
 
       // Split into tokens and drop empty tokens
-      final chars =
-          line.split(space).where((v) => v.isNotEmpty).toList(growable: false);
+      final List<String> chars = line
+          .split(space)
+          .where((String v) => v.isNotEmpty)
+          .toList(growable: false);
 
       if (chars.isEmpty) continue;
 
@@ -220,8 +218,8 @@ class _Object3DState extends State<Object3D> {
           ),
         );
       } else if (chars[0] == 'f') {
-        final face = <int>[];
-        for (var i = 1; i < chars.length; i++) {
+        final List<int> face = <int>[];
+        for (int i = 1; i < chars.length; i++) {
           face.add(int.parse(chars[i].split('/')[0]));
         }
         faces.add(face);
@@ -301,7 +299,7 @@ class _ObjectPainter extends CustomPainter {
   /// Calculate the position of a vertex in the 3D space
   Vector3 _calcVertex(Vector3 vertex) {
     // TODO: replace with ModelView matrix
-    final t = Matrix4.translationValues(
+    final Matrix4 t = Matrix4.translationValues(
       view.bounds.width * 0.5,
       view.bounds.height * 0.5,
       400.0 + view.zoom,
@@ -320,13 +318,14 @@ class _ObjectPainter extends CustomPainter {
 
   /// Calculate the 2D-positions of a vertex in the 3D space.
   List<Offset> _drawFace(List<Vector3> vertices, List<int> face) {
-    final coordinates = <Offset>[];
-    for (var i = 0; i < face.length; i++) {
+    final List<Offset> coordinates = <Offset>[];
+    for (int i = 0; i < face.length; i++) {
       double x, y, z;
       if (i < face.length - 1) {
-        final ref = vertices[face[i + 1] - 1];
-        final iV = ref.clone(); // view.mat.perspectiveTransform(ref.clone());
-        final norm = iV.normalized();
+        final Vector3 ref = vertices[face[i + 1] - 1];
+        final Vector3 iV =
+            ref.clone(); // view.mat.perspectiveTransform(ref.clone());
+        final Vector3 norm = iV.normalized();
 
         z = 1.0;
         z = norm.z.toDouble();
@@ -338,9 +337,10 @@ class _ObjectPainter extends CustomPainter {
         x = iV.x.toDouble() * z;
         y = iV.y.toDouble() * z;
       } else {
-        final ref = vertices[face[0] - 1];
-        final iV = ref.clone(); // view.mat.perspectiveTransform(ref.clone());
-        final norm = iV.normalized();
+        final Vector3 ref = vertices[face[0] - 1];
+        final Vector3 iV =
+            ref.clone(); // view.mat.perspectiveTransform(ref.clone());
+        final Vector3 norm = iV.normalized();
 
         z = 1.0;
         z = norm.z.toDouble();
@@ -361,9 +361,9 @@ class _ObjectPainter extends CustomPainter {
   /// Calculate the color of a vertex based on the
   /// position of the vertex and the light.
   Face _defaultFaceColor(Face face) {
-    final s = face.normal.dot(light);
-    final coefficient = math.max(0, s);
-    final c = Color.fromRGBO(
+    final double s = face.normal.dot(light);
+    final num coefficient = math.max(0, s);
+    final Color c = Color.fromRGBO(
       (color.red * coefficient).round(),
       (color.green * coefficient).round(),
       (color.blue * coefficient).round(),
@@ -375,39 +375,40 @@ class _ObjectPainter extends CustomPainter {
 
   /// Order vertices by the distance to the camera.
   List<AvgZ> _sortVertices(List<Vector3> vertices) {
-    final avgOfZ = <AvgZ>[];
-    for (var i = 0; i < faces.length; i++) {
-      final face = faces[i];
-      var z = 0.0;
-      for (final i in face) {
+    final List<AvgZ> avgOfZ = <AvgZ>[];
+    for (int i = 0; i < faces.length; i++) {
+      final List<int> face = faces[i];
+      double z = 0.0;
+      for (final int i in face) {
         z += vertices[i - 1].z;
       }
       avgOfZ.add(AvgZ(i, z));
     }
-    avgOfZ.sort((a, b) => a.z.compareTo(b.z));
+    avgOfZ.sort((AvgZ a, AvgZ b) => a.z.compareTo(b.z));
     return avgOfZ;
   }
 
   @override
   void paint(Canvas canvas, Size size) {
     // Calculate the position of the vertices in the 3D space.
-    final verticesToDraw = <Vector3>[];
-    for (final vertex in vertices) {
-      final defV = _calcVertex(Vector3.copy(vertex));
+    final List<Vector3> verticesToDraw = <Vector3>[];
+    for (final Vector3 vertex in vertices) {
+      final Vector3 defV = _calcVertex(Vector3.copy(vertex));
       verticesToDraw.add(defV);
     }
     // Order vertices by the distance to the camera.
-    final avgOfZ = _sortVertices(verticesToDraw);
+    final List<AvgZ> avgOfZ = _sortVertices(verticesToDraw);
 
     // Calculate the position of the vertices in the 2D space
     // and calculate the colors of the vertices.
-    final List<Offset> offsets = [];
-    final List<Color> colors = [];
+    final List<Offset> offsets = <Offset>[];
+    final List<Color> colors = <Color>[];
     for (int i = 0; i < faces.length; i++) {
-      final faceIdx = faces[avgOfZ[i].index];
+      final List<int> faceIdx = faces[avgOfZ[i].index];
 
       // Allocate list with a fixed size of 3
-      final verts = List.filled(3, Vector3.zero(), growable: false);
+      final List<Vector3> verts =
+          List<Vector3>.filled(3, Vector3.zero(), growable: false);
 
       verts[0] = verticesToDraw[faceIdx[0] - 1];
       verts[1] = verticesToDraw[faceIdx[1] - 1];
@@ -422,15 +423,15 @@ class _ObjectPainter extends CustomPainter {
       // Fallback on default color func if a custom one is not provided
       face = faceColorFunc?.call(face) ?? _defaultFaceColor(face);
 
-      colors.addAll([face.c1, face.c2, face.c3]);
+      colors.addAll(<Color>[face.c1, face.c2, face.c3]);
       offsets.addAll(_drawFace(verticesToDraw, faceIdx));
     }
 
     // Draw the vertices.
-    final paint = Paint();
+    final Paint paint = Paint();
     paint.style = PaintingStyle.fill;
     paint.color = color;
-    final v = Vertices(VertexMode.triangles, offsets, colors: colors);
+    final Vertices v = Vertices(VertexMode.triangles, offsets, colors: colors);
     canvas.drawVertices(v, BlendMode.clear, paint);
   }
 
