@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'dart:math' as math;
 import 'package:vector_math/vector_math_64.dart' show Vector3;
 import 'package:object_3d/object_3d.dart';
@@ -31,6 +32,14 @@ class MyHomePage extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
+  // Make a 400x400 viewport with 45 deg FOV, 10 near plane, and 1000 far plane
+  // and then place (warp) camera -200 units away from the origin (0,0)
+  Camera myCamera =
+      Camera(viewPort: Size(400, 400), fov: 45.0, near: 10, far: 1000)
+        ..warp(Vector3(0.0, 0.0, -200.0));
+
+  late final FocusNode focusNode;
+
   // (uncomment line in Object3D constructor)
   // ignore: unused_element
   Face _fresnel(Face face) {
@@ -50,17 +59,70 @@ class _MyHomePageState extends State<MyHomePage> {
     return face..setColors(c, c, c);
   }
 
+  void _handleCameraControls(KeyEvent event) {
+    if (event.logicalKey == LogicalKeyboardKey.keyA) {
+      myCamera.move(Vector3(-10.0, 0.0, 0.0));
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.keyD) {
+      myCamera.move(Vector3(10.0, 0.0, 0.0));
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.keyW) {
+      myCamera.move(Vector3(0.0, 0.0, 10.0));
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.keyS) {
+      myCamera.move(Vector3(0.0, 0.0, -10.0));
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.keyQ) {
+      myCamera.move(Vector3(0.0, -10.0, 0.0));
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.keyE) {
+      myCamera.move(Vector3(0.0, 10.0, 0.0));
+    }
+
+    if (event.logicalKey == LogicalKeyboardKey.space) {
+      // reset
+      myCamera.warp(Vector3(0.0, 0.0, -200.0));
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    focusNode = FocusNode();
+  }
+
+  @override
+  void dispose() {
+    focusNode.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
+    // We can update the camera view frustum
+    myCamera.viewPort = (MediaQuery.of(context).size);
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Object 3D Example'),
       ),
+      backgroundColor: Colors.red,
       body: Center(
-        child: Object3D(
-          view: Frustum(Size(400, 400), 0.1, 1000),
-          path: "assets/file.obj",
-          faceColorFunc: _fresnel, // uncomment to see in action
+        child: KeyboardListener(
+          focusNode: focusNode,
+          autofocus: true,
+          onKeyEvent: _handleCameraControls,
+          child: Object3D(
+            cam: myCamera,
+            path: "assets/file.obj",
+            color: Colors.blue,
+            // faceColorFunc: _fresnel, // uncomment to see in action
+          ),
         ),
       ),
     );

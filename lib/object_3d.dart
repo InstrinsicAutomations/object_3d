@@ -6,7 +6,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:vector_math/vector_math_64.dart' show Vector3, Matrix4;
+import 'package:vector_math/vector_math_64.dart' show Vector3, Vector4, Matrix4;
 
 typedef FaceColorFunc = Face Function(Face face);
 
@@ -65,43 +65,121 @@ class Face {
   }
 }
 
-class Frustum {
-  Matrix4 mat = Matrix4.identity();
-  Size bounds;
-  double zoom = 0.0;
-  bool _redraw = true;
+/// Represents the ViewProjection matrix
+class Camera {
+  final Matrix4 view = Matrix4.identity();
+  final Matrix4 proj = Matrix4.identity();
+  Size _viewPort;
+  double _fov; // in degrees
+  double _near;
+  double _far;
+  bool _dirtyView = true;
+  bool _dirtyFrustum = true;
 
-  Frustum(this.bounds, double near, double far) {
-    final double near2 = 2 * near;
-    final double height2 = 2 * bounds.height;
-    final double width2 = 2 * bounds.width;
-    final double farSubNear = far - near;
+  Camera({
+    required Size viewPort,
+    required double fov,
+    required double near,
+    required double far,
+  })  : _viewPort = viewPort,
+        _fov = fov,
+        _near = near,
+        _far = far;
 
-    mat[0] = near2 / width2;
-    mat[5] = near2 / height2;
-    mat[10] = -(far + near) / farSubNear;
-    mat[11] = -1.0;
-    mat[14] = (-far * near2) / farSubNear;
-    mat[15] = 0.0;
+  void look(Vector3 dir) {
+    // TODO: implement
+    _dirtyView = true;
   }
 
-  void redraw() {
-    _redraw = true;
+  void warp(Vector3 pos) {
+    view
+      ..setIdentity()
+      ..translate(pos);
+    _dirtyView = true;
+  }
+
+  void move(Vector3 amount) {
+    view.translate(amount);
+    _dirtyView = true;
   }
 
   bool get needsRedraw {
-    if (_redraw) {
-      _redraw = false;
-      return true;
+    bool redraw = false;
+
+    if (_dirtyView) {
+      redraw |= true;
     }
 
-    return false;
+    if (_dirtyFrustum) {
+      redraw |= true;
+      _calculateFrustum(_viewPort, _fov, _near, _far);
+    }
+
+    _dirtyView = false;
+    _dirtyFrustum = false;
+
+    return redraw;
+  }
+
+  //
+  // Changes to these fields require rebuilding frustum
+  //
+  set viewPort(Size size) {
+    _viewPort = size;
+    _dirtyFrustum = true;
+  }
+
+  Size get viewPort {
+    return _viewPort;
+  }
+
+  // angle is in degrees
+  set fov(double angle) {
+    _fov = angle;
+    _dirtyFrustum = true;
+  }
+
+  // fov angle is in degrees
+  double get fov {
+    return _fov;
+  }
+
+  set near(double n) {
+    _near = n;
+    _dirtyFrustum = true;
+  }
+
+  double get near {
+    return _near;
+  }
+
+  set far(double f) {
+    _far = f;
+    _dirtyFrustum = true;
+  }
+
+  double get far {
+    return _far;
+  }
+
+  void _calculateFrustum(Size bounds, double fov, double near, double far) {
+    final double a = bounds.width / bounds.height;
+    final double theta = (fov * math.pi) / 180.0;
+    final double ta = math.tan(theta / 2.0);
+    final double farSubNear = far - near;
+
+    proj[0] = 1.0 / (ta * a);
+    proj[5] = 1.0 / ta;
+    proj[10] = -(far + near) / farSubNear;
+    proj[11] = -1.0;
+    proj[14] = (-2.0 * far * near) / farSubNear;
+    proj[15] = 0.0;
   }
 }
 
 class Object3D extends StatefulWidget {
   const Object3D({
-    required this.view,
+    required this.cam,
     super.key,
     this.color = Colors.white,
     this.object,
@@ -133,7 +211,7 @@ class Object3D extends StatefulWidget {
           'Parameter maxSpeed must be positive, non-zero real number.',
         );
 
-  final Frustum view;
+  final Camera cam;
   final String? path;
   final String? object;
   final Color color;
@@ -255,17 +333,19 @@ class _Object3DState extends State<Object3D> {
     return GestureDetector(
       onPanUpdate: _handlePanDelta,
       onPanEnd: _handlePanEnd,
-      child: CustomPaint(
-        size: widget.view.bounds,
-        painter: _ObjectPainter(
-          view: widget.view,
-          pitch: _pitch,
-          yaw: _yaw,
-          roll: 0,
-          vertices: vertices,
-          color: widget.color,
-          faces: faces,
-          faceColorFunc: widget.faceColorFunc,
+      child: ClipRect(
+        child: CustomPaint(
+          size: widget.cam.viewPort,
+          painter: _ObjectPainter(
+            cam: widget.cam,
+            pitch: _pitch,
+            yaw: _yaw,
+            roll: 0,
+            vertices: vertices,
+            color: widget.color,
+            faces: faces,
+            faceColorFunc: widget.faceColorFunc,
+          ),
         ),
       ),
     );
@@ -280,13 +360,13 @@ class _ObjectPainter extends CustomPainter {
   final List<Vector3> vertices;
   final List<List<int>> faces;
 
-  final Frustum view;
-  final Vector3 light = Vector3(0.0, 0.0, 100.0).normalized();
+  final Camera cam;
+  final Vector3 light = Vector3(0.0, 0.0, -1.0);
 
   final FaceColorFunc? faceColorFunc;
 
   _ObjectPainter({
-    required this.view,
+    required this.cam,
     required this.pitch,
     required this.yaw,
     required this.roll,
@@ -298,17 +378,12 @@ class _ObjectPainter extends CustomPainter {
 
   /// Calculate the position of a vertex in the 3D space
   Vector3 _calcVertex(Vector3 vertex) {
-    // TODO: replace with ModelView matrix
-    final Matrix4 t = Matrix4.translationValues(
-      view.bounds.width * 0.5,
-      view.bounds.height * 0.5,
-      400.0 + view.zoom,
-    );
-    t.scale(100.0, -100.0); // TODO: remove after testing
-    t.rotateX(_degreeToRadian(pitch));
-    t.rotateY(_degreeToRadian(yaw));
-    t.rotateZ(_degreeToRadian(roll));
-    return t.transform3(vertex);
+    final Matrix4 model = Matrix4.identity();
+    model.scale(100.0, 100.0); // TODO: remove after testing
+    model.rotateX(_degreeToRadian(pitch));
+    model.rotateY(_degreeToRadian(yaw));
+    model.rotateZ(_degreeToRadian(roll));
+    return model.transform3(vertex);
   }
 
   /// Convert degree to radian.
@@ -320,40 +395,21 @@ class _ObjectPainter extends CustomPainter {
   List<Offset> _drawFace(List<Vector3> vertices, List<int> face) {
     final List<Offset> coordinates = <Offset>[];
     for (int i = 0; i < face.length; i++) {
-      double x, y, z;
+      Vector3 iV;
       if (i < face.length - 1) {
-        final Vector3 ref = vertices[face[i + 1] - 1];
-        final Vector3 iV =
-            ref.clone(); // view.mat.perspectiveTransform(ref.clone());
-        final Vector3 norm = iV.normalized();
-
-        z = 1.0;
-        z = norm.z.toDouble();
-        if (z == 0) {
-          z = 1.0;
-        } else {
-          z = 1.0 / z;
-        }
-        x = iV.x.toDouble() * z;
-        y = iV.y.toDouble() * z;
+        iV = vertices[face[i + 1] - 1];
       } else {
-        final Vector3 ref = vertices[face[0] - 1];
-        final Vector3 iV =
-            ref.clone(); // view.mat.perspectiveTransform(ref.clone());
-        final Vector3 norm = iV.normalized();
-
-        z = 1.0;
-        z = norm.z.toDouble();
-
-        if (z == 0) {
-          z = 1.0;
-        } else {
-          z = 1.0 / z;
-        }
-        x = iV.x.toDouble() * z;
-        y = iV.y.toDouble() * z;
+        iV = vertices[face[0] - 1];
       }
-      coordinates.add(Offset(x, y));
+
+      final Offset center = cam.viewPort.center(Offset.zero);
+      final Matrix4 vp = cam.proj * cam.view;
+      final Vector4 v = vp.transform(Vector4(iV.x, iV.y, iV.z, 1.0));
+
+      final double x = ((v.x / v.w) * center.dx);
+      final double y = ((v.y / v.w) * center.dy);
+
+      coordinates.add(Offset(x, y) + center);
     }
     return coordinates;
   }
@@ -442,8 +498,8 @@ class _ObjectPainter extends CustomPainter {
       old.pitch != pitch ||
       old.yaw != yaw ||
       old.roll != roll ||
-      old.view != view ||
-      view.needsRedraw;
+      old.cam != cam ||
+      cam.needsRedraw;
 }
 
 class AvgZ {
