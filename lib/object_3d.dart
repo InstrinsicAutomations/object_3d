@@ -6,10 +6,12 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:vector_math/vector_math_64.dart' show Vector3, Vector4, Matrix4;
+import 'package:vector_math/vector_math_64.dart'
+    show Vector2, Vector3, Vector4, Matrix4;
 
 typedef FaceColorFunc = Face Function(Face face);
 typedef TickFunc = void Function(Timer timer);
+typedef RayHitFunc = void Function(Face face);
 
 /// Represents a face (3 vertices) with color data
 class Face {
@@ -230,6 +232,7 @@ class Object3D extends StatefulWidget {
     this.reverseYaw = false,
     this.faceColorFunc,
     this.onTick,
+    this.onRayHit,
   })  : assert(
           object != null || path != null,
           'You must provide an object or a path',
@@ -264,6 +267,7 @@ class Object3D extends StatefulWidget {
   final bool reverseYaw; // if true, rotation direction is flipped for yaw
   final FaceColorFunc? faceColorFunc; // If unset, uses _defaultFaceColor()
   final TickFunc? onTick; // Optional callback to perform extra ops on tick
+  final RayHitFunc? onRayHit; // Optional callback to perform a ray hit check
 
   @override
   State<Object3D> createState() => _Object3DState();
@@ -273,6 +277,7 @@ class _Object3DState extends State<Object3D> {
   double _pitch = 0.0, _yaw = 0.0;
   double? _previousX, _previousY;
   double _deltaX = 0.0, _deltaY = 0.0;
+  Offset? _pendingRay;
   List<Vector3> vertices = <Vector3>[];
   List<List<int>> faces = <List<int>>[];
   late Timer _updateTimer;
@@ -364,12 +369,20 @@ class _Object3DState extends State<Object3D> {
       _deltaX += widget.swipeCoef * (_previousX! - data.globalPosition.dx);
     }
     _previousX = data.globalPosition.dx;
+
+    // TODO: remove after ray tests are working
+    _pendingRay = data.localPosition;
   }
 
-  // invalidates _previousX and _previousY
+  // Invalidates _previousX and _previousY
   void _handlePanEnd(DragEndDetails _) {
     _previousX = null;
     _previousY = null;
+  }
+
+  // Queues a 2D point for casting and testing a ray in the next repaint
+  void _handleRayTest(TapDownDetails data) {
+    _pendingRay = data.localPosition;
   }
 
   @override
@@ -382,6 +395,7 @@ class _Object3DState extends State<Object3D> {
     return GestureDetector(
       onPanUpdate: _handlePanDelta,
       onPanEnd: _handlePanEnd,
+      onDoubleTapDown: _handleRayTest,
       child: ClipRect(
         child: CustomPaint(
           size: widget.cam.viewPort,
@@ -395,6 +409,8 @@ class _Object3DState extends State<Object3D> {
             color: widget.color,
             faces: faces,
             faceColorFunc: widget.faceColorFunc,
+            rayHitFunc: widget.onRayHit,
+            pendingRay: _pendingRay,
           ),
         ),
       ),
@@ -414,6 +430,8 @@ class _ObjectPainter extends CustomPainter {
   final Camera cam;
 
   final FaceColorFunc? faceColorFunc;
+  final RayHitFunc? rayHitFunc;
+  final Offset? pendingRay;
 
   _ObjectPainter({
     required this.cam,
@@ -425,6 +443,8 @@ class _ObjectPainter extends CustomPainter {
     required this.color,
     required this.faces,
     this.faceColorFunc,
+    this.rayHitFunc,
+    this.pendingRay,
   });
 
   /// Calculate the position of a vertex in the 3D space
@@ -497,6 +517,28 @@ class _ObjectPainter extends CustomPainter {
     return avgOfZ;
   }
 
+  bool _pointInTriangle(Vector2 p, Face t) {
+    Vector2 a = t.v1.xy;
+    Vector2 b = t.v2.xy;
+    Vector2 c = t.v3.xy;
+
+    a -= p;
+    b -= p;
+    c -= p;
+
+    final double ab = a.dot(b);
+    final double ac = a.dot(c);
+    final double bc = b.dot(c);
+    final double cc = c.dot(c);
+
+    if (bc * ac - cc * ab < 0.0) return false;
+
+    final double bb = b.dot(b);
+    if (ab * bc - ac * bb < 0.0) return false;
+
+    return true;
+  }
+
   @override
   void paint(Canvas canvas, Size size) {
     // Calculate the position of the vertices in the 3D space.
@@ -531,6 +573,24 @@ class _ObjectPainter extends CustomPainter {
 
       // Fallback on default color func if a custom one is not provided
       face = faceColorFunc?.call(face) ?? _defaultFaceColor(face);
+
+      // TODO: remove from tests
+      if (pendingRay != null) {
+        final Offset center = cam.viewPort.center(Offset.zero);
+        final Matrix4 invProj = Matrix4.copy(cam.proj * cam.view)..invert();
+        final Vector3 ray = invProj.transform3(
+          Vector3(pendingRay!.dx - center.dx, pendingRay!.dy - center.dy, 0),
+        );
+
+        // Test the point if it falls within a triangle
+        if (_pointInTriangle(Vector2(ray.x, ray.y), face)) {
+          rayHitFunc?.call(face);
+          face
+            ..c1 = Colors.green
+            ..c2 = Colors.green
+            ..c3 = Colors.green;
+        }
+      }
 
       colors.addAll(<Color>[face.c1, face.c2, face.c3]);
       offsets.addAll(_drawFace(verticesToDraw, faceIdx));
