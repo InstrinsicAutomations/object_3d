@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart' show Vector3, Vector4, Matrix4;
 
 typedef FaceColorFunc = Face Function(Face face);
+typedef TickFunc = void Function(Timer timer);
 
 /// Represents a face (3 vertices) with color data
 class Face {
@@ -69,12 +70,16 @@ class Face {
 class Camera {
   final Matrix4 view = Matrix4.identity();
   final Matrix4 proj = Matrix4.identity();
+  Vector3 _up = Vector3(0, 1, 0);
+  Vector3 _forward = Vector3(0, 0, -1);
+  Vector3 _right = Vector3(1, 0, 0);
+  Vector3 _pos = Vector3(0, 0, 0);
   Size _viewPort;
   double _fov; // in degrees
   double _near;
   double _far;
-  bool _dirtyView = true;
-  bool _dirtyFrustum = true;
+  bool _dirtyView = false;
+  bool _dirtyFrustum = false;
 
   Camera({
     required Size viewPort,
@@ -84,22 +89,59 @@ class Camera {
   })  : _viewPort = viewPort,
         _fov = fov,
         _near = near,
-        _far = far;
+        _far = far {
+    _calculateFrustum(viewPort, fov, near, far);
+    look(Vector3.zero());
+  }
 
-  void look(Vector3 dir) {
-    // TODO: implement
+  void look(Vector3 point) {
+    final Vector3 eye = _pos;
+    _forward = (point - eye).normalized();
+    _right = _up.cross(_forward).normalized();
+    _up = _forward.cross(_right).normalized();
+
+    // Overwrite
+    view.row0 = Vector4(_right.x, _right.y, _right.z, 0);
+    view.row1 = Vector4(_up.x, _up.y, _up.z, 0);
+    view.row2 = Vector4(_forward.x, _forward.y, _forward.z, 0);
+    view.row3 = Vector4(0, 0, 0, 1.0);
+
+    // preserve position by multiplying by translation matrix P
+    final Matrix4 p = Matrix4.identity()
+      ..setColumn(3, Vector4(eye.x, eye.y, eye.z, 1.0));
+    view.multiply(p);
+    _pos = view.getTranslation();
+
     _dirtyView = true;
   }
 
+  /// Reset orientation and position of camera.
+  /// Does not reset the projection matrix.
   void warp(Vector3 pos) {
-    view
-      ..setIdentity()
-      ..translate(pos);
+    _forward = Vector3(0, 0, -1);
+    _right = Vector3(1, 0, 0);
+    _up = Vector3(0, 1, 0);
+
+    // Overwrite
+    view.row0 = Vector4(_right.x, _right.y, _right.z, 0);
+    view.row1 = Vector4(_up.x, _up.y, _up.z, 0);
+    view.row2 = Vector4(_forward.x, _forward.y, _forward.z, 0);
+    view.row3 = Vector4(0, 0, 0, 1.0);
+
+    // preserve position by multiplying by translation matrix P
+    final Matrix4 p = Matrix4.identity()
+      ..setColumn(3, Vector4(pos.x, pos.y, pos.z, 1.0));
+    view.multiply(p);
+    _pos = view.getTranslation();
+
     _dirtyView = true;
   }
 
+  /// Move relative to the camera orientation
+  /// e.g. -/+x will always be left/right, -/+y is up/down, etc.
   void move(Vector3 amount) {
-    view.translate(amount);
+    _pos += (_forward * amount.z) + (_up * amount.y) + (_right * amount.x);
+    view.setTranslation(_pos);
     _dirtyView = true;
   }
 
@@ -107,11 +149,11 @@ class Camera {
     bool redraw = false;
 
     if (_dirtyView) {
-      redraw |= true;
+      redraw = true;
     }
 
     if (_dirtyFrustum) {
-      redraw |= true;
+      redraw = true;
       _calculateFrustum(_viewPort, _fov, _near, _far);
     }
 
@@ -124,11 +166,6 @@ class Camera {
   //
   // Changes to these fields require rebuilding frustum
   //
-  set viewPort(Size size) {
-    _viewPort = size;
-    _dirtyFrustum = true;
-  }
-
   Size get viewPort {
     return _viewPort;
   }
@@ -184,12 +221,15 @@ class Object3D extends StatefulWidget {
     this.color = Colors.white,
     this.object,
     this.path,
+    this.modelScale = 1.0,
     this.swipeCoef = 0.1,
     this.dampCoef = 0.92,
     this.maxSpeed = 10.0,
+    this.adaptiveViewport = false,
     this.reversePitch = true,
     this.reverseYaw = false,
     this.faceColorFunc,
+    this.onTick,
   })  : assert(
           object != null || path != null,
           'You must provide an object or a path',
@@ -218,16 +258,19 @@ class Object3D extends StatefulWidget {
   final double swipeCoef; // pan delta intensity
   final double dampCoef; // psuedo-friction 0.001-0.999
   final double maxSpeed; // in rots per 16 ms
+  final double modelScale; // Scale of the .obj model (default: 1:1)
+  final bool adaptiveViewport; // If true, calculates the viewport from parent
   final bool reversePitch; // if true, rotation direction is flipped for pitch
   final bool reverseYaw; // if true, rotation direction is flipped for yaw
   final FaceColorFunc? faceColorFunc; // If unset, uses _defaultFaceColor()
+  final TickFunc? onTick; // Optional callback to perform extra ops on tick
 
   @override
   State<Object3D> createState() => _Object3DState();
 }
 
 class _Object3DState extends State<Object3D> {
-  double _pitch = 15.0, _yaw = 45.0;
+  double _pitch = 0.0, _yaw = 0.0;
   double? _previousX, _previousY;
   double _deltaX = 0.0, _deltaY = 0.0;
   List<Vector3> vertices = <Vector3>[];
@@ -247,6 +290,7 @@ class _Object3DState extends State<Object3D> {
     _updateTimer =
         Timer.periodic(const Duration(milliseconds: 16), (Timer timer) {
       if (!mounted) return;
+      widget.onTick?.call(timer);
       setState(() {
         final double adx = _deltaX.abs();
         final double ady = _deltaY.abs();
@@ -330,6 +374,11 @@ class _Object3DState extends State<Object3D> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.adaptiveViewport) {
+      widget.cam._viewPort = (MediaQuery.of(context).size);
+      widget.cam._dirtyFrustum = true;
+    }
+
     return GestureDetector(
       onPanUpdate: _handlePanDelta,
       onPanEnd: _handlePanEnd,
@@ -338,6 +387,7 @@ class _Object3DState extends State<Object3D> {
           size: widget.cam.viewPort,
           painter: _ObjectPainter(
             cam: widget.cam,
+            modelScale: widget.modelScale,
             pitch: _pitch,
             yaw: _yaw,
             roll: 0,
@@ -353,7 +403,8 @@ class _Object3DState extends State<Object3D> {
 }
 
 class _ObjectPainter extends CustomPainter {
-  final double pitch, yaw, roll;
+  /// Fundamentally, the 3D object's model matrix parts
+  final double pitch, yaw, roll, modelScale;
 
   final Color color;
 
@@ -361,12 +412,12 @@ class _ObjectPainter extends CustomPainter {
   final List<List<int>> faces;
 
   final Camera cam;
-  final Vector3 light = Vector3(0.0, 0.0, -1.0);
 
   final FaceColorFunc? faceColorFunc;
 
   _ObjectPainter({
     required this.cam,
+    required this.modelScale,
     required this.pitch,
     required this.yaw,
     required this.roll,
@@ -379,7 +430,7 @@ class _ObjectPainter extends CustomPainter {
   /// Calculate the position of a vertex in the 3D space
   Vector3 _calcVertex(Vector3 vertex) {
     final Matrix4 model = Matrix4.identity();
-    model.scale(100.0, 100.0); // TODO: remove after testing
+    model.scale(modelScale, modelScale);
     model.rotateX(_degreeToRadian(pitch));
     model.rotateY(_degreeToRadian(yaw));
     model.rotateZ(_degreeToRadian(roll));
@@ -404,7 +455,7 @@ class _ObjectPainter extends CustomPainter {
 
       final Offset center = cam.viewPort.center(Offset.zero);
       final Matrix4 vp = cam.proj * cam.view;
-      final Vector4 v = vp.transform(Vector4(iV.x, iV.y, iV.z, 1.0));
+      final Vector4 v = vp * Vector4(iV.x, iV.y, iV.z, 1.0);
 
       final double x = ((v.x / v.w) * center.dx);
       final double y = ((v.y / v.w) * center.dy);
@@ -417,6 +468,8 @@ class _ObjectPainter extends CustomPainter {
   /// Calculate the color of a vertex based on the
   /// position of the vertex and the light.
   Face _defaultFaceColor(Face face) {
+    final Vector3 light = Vector3(0.0, 0.0, -1.0);
+
     final double s = face.normal.dot(light);
     final num coefficient = math.max(0, s);
     final Color c = Color.fromRGBO(
@@ -493,13 +546,14 @@ class _ObjectPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_ObjectPainter old) =>
+      old.cam != cam ||
+      old.cam.needsRedraw ||
+      old.modelScale != modelScale ||
       old.vertices != vertices ||
       old.faces != faces ||
       old.pitch != pitch ||
       old.yaw != yaw ||
-      old.roll != roll ||
-      old.cam != cam ||
-      cam.needsRedraw;
+      old.roll != roll;
 }
 
 class AvgZ {

@@ -1,6 +1,7 @@
+import 'dart:math' as math;
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'dart:math' as math;
 import 'package:vector_math/vector_math_64.dart' show Vector3;
 import 'package:object_3d/object_3d.dart';
 
@@ -40,6 +41,9 @@ class _MyHomePageState extends State<MyHomePage> {
 
   late final FocusNode focusNode;
 
+  // tracks keyboard keys
+  final Map<LogicalKeyboardKey, bool> _keyDown = {};
+
   // (uncomment line in Object3D constructor)
   // ignore: unused_element
   Face _fresnel(Face face) {
@@ -59,32 +63,37 @@ class _MyHomePageState extends State<MyHomePage> {
     return face..setColors(c, c, c);
   }
 
-  void _handleCameraControls(KeyEvent event) {
-    if (event.logicalKey == LogicalKeyboardKey.keyA) {
+  void _handleFrameTick(Timer _) {
+    if (_keyDown[LogicalKeyboardKey.keyA] ?? false) {
       myCamera.move(Vector3(-10.0, 0.0, 0.0));
     }
 
-    if (event.logicalKey == LogicalKeyboardKey.keyD) {
+    if (_keyDown[LogicalKeyboardKey.keyD] ?? false) {
       myCamera.move(Vector3(10.0, 0.0, 0.0));
     }
 
-    if (event.logicalKey == LogicalKeyboardKey.keyW) {
+    if (_keyDown[LogicalKeyboardKey.keyW] ?? false) {
       myCamera.move(Vector3(0.0, 0.0, 10.0));
     }
 
-    if (event.logicalKey == LogicalKeyboardKey.keyS) {
+    if (_keyDown[LogicalKeyboardKey.keyS] ?? false) {
       myCamera.move(Vector3(0.0, 0.0, -10.0));
     }
 
-    if (event.logicalKey == LogicalKeyboardKey.keyQ) {
+    if (_keyDown[LogicalKeyboardKey.keyQ] ?? false) {
       myCamera.move(Vector3(0.0, -10.0, 0.0));
     }
 
-    if (event.logicalKey == LogicalKeyboardKey.keyE) {
+    if (_keyDown[LogicalKeyboardKey.keyE] ?? false) {
       myCamera.move(Vector3(0.0, 10.0, 0.0));
     }
 
-    if (event.logicalKey == LogicalKeyboardKey.space) {
+    if (_keyDown[LogicalKeyboardKey.keyR] ?? false) {
+      // will rotate the camera to look at the origin from anywhere
+      myCamera.look(Vector3(0.0, 0.0, 0.0));
+    }
+
+    if (_keyDown[LogicalKeyboardKey.space] ?? false) {
       // reset
       myCamera.warp(Vector3(0.0, 0.0, -200.0));
     }
@@ -104,9 +113,6 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    // We can update the camera view frustum
-    myCamera.viewPort = (MediaQuery.of(context).size);
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Object 3D Example'),
@@ -116,11 +122,14 @@ class _MyHomePageState extends State<MyHomePage> {
         child: KeyboardListener(
           focusNode: focusNode,
           autofocus: true,
-          onKeyEvent: _handleCameraControls,
+          onKeyEvent: (e) => _keyDown[e.logicalKey] = !(e is KeyUpEvent),
           child: Object3D(
             cam: myCamera,
             path: "assets/file.obj",
+            modelScale: 100,
+            adaptiveViewport: true,
             color: Colors.blue,
+            onTick: _handleFrameTick,
             // faceColorFunc: _fresnel, // uncomment to see in action
           ),
         ),
