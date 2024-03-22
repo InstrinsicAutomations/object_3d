@@ -610,17 +610,19 @@ class _ObjectPainter extends CustomPainter {
       offsets.addAll(_drawFace(verticesToDraw, faceIdx));
     }
 
+    // Emit the closest face hit by the ray test
+    if (rayTestResults.isNotEmpty) {
+      // If set this function can change the color of the face
+      // or use it in some other computation
+      rayHitFunc?.call(rayTestResults.last);
+    }
+
     // Draw the vertices.
     final Paint paint = Paint();
     paint.style = PaintingStyle.fill;
     paint.color = color;
     final Vertices v = Vertices(VertexMode.triangles, offsets, colors: colors);
     canvas.drawVertices(v, BlendMode.clear, paint);
-
-    // Emit the closest face hit by the ray test
-    if (rayTestResults.isNotEmpty) {
-      rayHitFunc?.call(rayTestResults.last);
-    }
   }
 
   @override
