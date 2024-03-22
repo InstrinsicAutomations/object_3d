@@ -73,11 +73,11 @@ class _MyHomePageState extends State<MyHomePage> {
     }
 
     if (_keyDown[LogicalKeyboardKey.keyW] ?? false) {
-      myCamera.move(Vector3(0.0, 0.0, 10.0));
+      myCamera.move(Vector3(0.0, 0.0, -10.0));
     }
 
     if (_keyDown[LogicalKeyboardKey.keyS] ?? false) {
-      myCamera.move(Vector3(0.0, 0.0, -10.0));
+      myCamera.move(Vector3(0.0, 0.0, 10.0));
     }
 
     if (_keyDown[LogicalKeyboardKey.keyQ] ?? false) {
@@ -99,6 +99,10 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  void _handleRayHit(Face face) {
+    print("Face was ${face.v1}, ${face.v2}, ${face.v3}");
+  }
+
   @override
   void initState() {
     super.initState();
@@ -117,7 +121,6 @@ class _MyHomePageState extends State<MyHomePage> {
       appBar: AppBar(
         title: const Text('Object 3D Example'),
       ),
-      backgroundColor: Colors.red,
       body: Center(
         child: KeyboardListener(
           focusNode: focusNode,
@@ -130,7 +133,8 @@ class _MyHomePageState extends State<MyHomePage> {
             adaptiveViewport: true,
             color: Colors.blue,
             onTick: _handleFrameTick,
-            // faceColorFunc: _fresnel, // uncomment to see in action
+            onRayHit: _handleRayHit,
+            faceColorFunc: _fresnel, // uncomment to see in action
           ),
         ),
       ),

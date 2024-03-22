@@ -6,8 +6,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:vector_math/vector_math_64.dart'
-    show Vector2, Vector3, Vector4, Matrix4;
+import 'package:vector_math/vector_math_64.dart' show Vector3, Vector4, Matrix4;
 
 typedef FaceColorFunc = Face Function(Face face);
 typedef TickFunc = void Function(Timer timer);
@@ -36,7 +35,7 @@ class Face {
   }
 
   Vector3 get v3 {
-    return _v1;
+    return _v3;
   }
 
   /// setters - invalidate normal cache
@@ -70,7 +69,7 @@ class Face {
 
 /// Represents the ViewProjection matrix
 class Camera {
-  final Matrix4 view = Matrix4.identity();
+  final Matrix4 _mat = Matrix4.identity();
   final Matrix4 proj = Matrix4.identity();
   Vector3 _up = Vector3(0, 1, 0);
   Vector3 _forward = Vector3(0, 0, -1);
@@ -103,16 +102,16 @@ class Camera {
     _up = _forward.cross(_right).normalized();
 
     // Overwrite
-    view.row0 = Vector4(_right.x, _right.y, _right.z, 0);
-    view.row1 = Vector4(_up.x, _up.y, _up.z, 0);
-    view.row2 = Vector4(_forward.x, _forward.y, _forward.z, 0);
-    view.row3 = Vector4(0, 0, 0, 1.0);
+    _mat.row0 = Vector4(_right.x, _right.y, _right.z, 0);
+    _mat.row1 = Vector4(_up.x, _up.y, _up.z, 0);
+    _mat.row2 = Vector4(_forward.x, _forward.y, _forward.z, 0);
+    _mat.row3 = Vector4(0, 0, 0, 1.0);
 
     // preserve position by multiplying by translation matrix P
     final Matrix4 p = Matrix4.identity()
       ..setColumn(3, Vector4(eye.x, eye.y, eye.z, 1.0));
-    view.multiply(p);
-    _pos = view.getTranslation();
+    _mat.multiply(p);
+    _pos = _mat.getTranslation();
 
     _dirtyView = true;
   }
@@ -125,26 +124,30 @@ class Camera {
     _up = Vector3(0, 1, 0);
 
     // Overwrite
-    view.row0 = Vector4(_right.x, _right.y, _right.z, 0);
-    view.row1 = Vector4(_up.x, _up.y, _up.z, 0);
-    view.row2 = Vector4(_forward.x, _forward.y, _forward.z, 0);
-    view.row3 = Vector4(0, 0, 0, 1.0);
+    _mat.row0 = Vector4(_right.x, _right.y, _right.z, 0);
+    _mat.row1 = Vector4(_up.x, _up.y, _up.z, 0);
+    _mat.row2 = Vector4(_forward.x, _forward.y, _forward.z, 0);
+    _mat.row3 = Vector4(0, 0, 0, 1.0);
 
     // preserve position by multiplying by translation matrix P
     final Matrix4 p = Matrix4.identity()
       ..setColumn(3, Vector4(pos.x, pos.y, pos.z, 1.0));
-    view.multiply(p);
-    _pos = view.getTranslation();
+    _mat.multiply(p);
+    _pos = _mat.getTranslation();
 
     _dirtyView = true;
   }
 
-  /// Move relative to the camera orientation
+  /// Move relative to the camera orientation (negate amount)
   /// e.g. -/+x will always be left/right, -/+y is up/down, etc.
   void move(Vector3 amount) {
-    _pos += (_forward * amount.z) + (_up * amount.y) + (_right * amount.x);
-    view.setTranslation(_pos);
+    _pos -= (_forward * amount.z) + (_up * amount.y) + (_right * amount.x);
+    _mat.setTranslation(_pos);
     _dirtyView = true;
+  }
+
+  Matrix4 get view {
+    return Matrix4.zero()..copyInverse(_mat);
   }
 
   bool get needsRedraw {
@@ -369,9 +372,6 @@ class _Object3DState extends State<Object3D> {
       _deltaX += widget.swipeCoef * (_previousX! - data.globalPosition.dx);
     }
     _previousX = data.globalPosition.dx;
-
-    // TODO: remove after ray tests are working
-    _pendingRay = data.localPosition;
   }
 
   // Invalidates _previousX and _previousY
@@ -381,8 +381,13 @@ class _Object3DState extends State<Object3D> {
   }
 
   // Queues a 2D point for casting and testing a ray in the next repaint
-  void _handleRayTest(TapDownDetails data) {
+  void _handleRayTestStart(TapDownDetails data) {
     _pendingRay = data.localPosition;
+  }
+
+  void _forwardRayHit(Face face) {
+    _pendingRay = null;
+    widget.onRayHit?.call(face);
   }
 
   @override
@@ -395,7 +400,7 @@ class _Object3DState extends State<Object3D> {
     return GestureDetector(
       onPanUpdate: _handlePanDelta,
       onPanEnd: _handlePanEnd,
-      onDoubleTapDown: _handleRayTest,
+      onDoubleTapDown: _handleRayTestStart,
       child: ClipRect(
         child: CustomPaint(
           size: widget.cam.viewPort,
@@ -409,7 +414,7 @@ class _Object3DState extends State<Object3D> {
             color: widget.color,
             faces: faces,
             faceColorFunc: widget.faceColorFunc,
-            rayHitFunc: widget.onRayHit,
+            rayHitFunc: _forwardRayHit,
             pendingRay: _pendingRay,
           ),
         ),
@@ -421,6 +426,9 @@ class _Object3DState extends State<Object3D> {
 class _ObjectPainter extends CustomPainter {
   /// Fundamentally, the 3D object's model matrix parts
   final double pitch, yaw, roll, modelScale;
+
+  /// The calculated model matrix for reverse projection later
+  final Matrix4 mat = Matrix4.identity();
 
   final Color color;
 
@@ -445,16 +453,11 @@ class _ObjectPainter extends CustomPainter {
     this.faceColorFunc,
     this.rayHitFunc,
     this.pendingRay,
-  });
-
-  /// Calculate the position of a vertex in the 3D space
-  Vector3 _calcVertex(Vector3 vertex) {
-    final Matrix4 model = Matrix4.identity();
-    model.scale(modelScale, modelScale);
-    model.rotateX(_degreeToRadian(pitch));
-    model.rotateY(_degreeToRadian(yaw));
-    model.rotateZ(_degreeToRadian(roll));
-    return model.transform3(vertex);
+  }) {
+    mat.scale(modelScale, modelScale);
+    mat.rotateX(_degreeToRadian(pitch));
+    mat.rotateY(_degreeToRadian(yaw));
+    mat.rotateZ(_degreeToRadian(roll));
   }
 
   /// Convert degree to radian.
@@ -503,6 +506,7 @@ class _ObjectPainter extends CustomPainter {
   }
 
   /// Order vertices by the distance to the camera.
+  /// TODO: use camera
   List<AvgZ> _sortVertices(List<Vector3> vertices) {
     final List<AvgZ> avgOfZ = <AvgZ>[];
     for (int i = 0; i < faces.length; i++) {
@@ -517,24 +521,25 @@ class _ObjectPainter extends CustomPainter {
     return avgOfZ;
   }
 
-  bool _pointInTriangle(Vector2 p, Face t) {
-    Vector2 a = t.v1.xy;
-    Vector2 b = t.v2.xy;
-    Vector2 c = t.v3.xy;
+  bool _rayIntersects(Vector3 from, Vector3 to, Face face) {
+    final Vector3 ab = face.v2 - face.v1;
+    final Vector3 ac = face.v3 - face.v1;
+    final Vector3 qp = from - to;
 
-    a -= p;
-    b -= p;
-    c -= p;
+    final Vector3 n = ab.cross(ac);
+    final double d = qp.dot(n);
 
-    final double ab = a.dot(b);
-    final double ac = a.dot(c);
-    final double bc = b.dot(c);
-    final double cc = c.dot(c);
+    if (d <= 0) return false;
 
-    if (bc * ac - cc * ab < 0.0) return false;
+    final Vector3 ap = from - face.v1;
+    final double t = ap.dot(n);
+    if (t < 0) return false;
 
-    final double bb = b.dot(b);
-    if (ab * bc - ac * bb < 0.0) return false;
+    final Vector3 e = qp.cross(ap);
+    final double v = ac.dot(e);
+    if (v < 0 || v > d) return false;
+    final double w = -ab.dot(e);
+    if (w < 0 || v + w > d) return false;
 
     return true;
   }
@@ -542,18 +547,23 @@ class _ObjectPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     // Calculate the position of the vertices in the 3D space.
-    final List<Vector3> verticesToDraw = <Vector3>[];
-    for (final Vector3 vertex in vertices) {
-      final Vector3 defV = _calcVertex(Vector3.copy(vertex));
-      verticesToDraw.add(defV);
-    }
+    final List<Vector3> verticesToDraw =
+        vertices.map<Vector3>((Vector3 e) => mat * Vector3.copy(e)).toList();
+
     // Order vertices by the distance to the camera.
     final List<AvgZ> avgOfZ = _sortVertices(verticesToDraw);
+
+    // Used for mouse reprojection later
+    final Offset center = cam.viewPort.center(Offset.zero);
+    final Matrix4 invViewProj = Matrix4.zero()
+      ..copyInverse(cam.proj * cam.view);
 
     // Calculate the position of the vertices in the 2D space
     // and calculate the colors of the vertices.
     final List<Offset> offsets = <Offset>[];
     final List<Color> colors = <Color>[];
+    final List<Face> rayTestResults = <Face>[];
+
     for (int i = 0; i < faces.length; i++) {
       final List<int> faceIdx = faces[avgOfZ[i].index];
 
@@ -574,21 +584,25 @@ class _ObjectPainter extends CustomPainter {
       // Fallback on default color func if a custom one is not provided
       face = faceColorFunc?.call(face) ?? _defaultFaceColor(face);
 
-      // TODO: remove from tests
       if (pendingRay != null) {
-        final Offset center = cam.viewPort.center(Offset.zero);
-        final Matrix4 invProj = Matrix4.copy(cam.proj * cam.view)..invert();
-        final Vector3 ray = invProj.transform3(
-          Vector3(pendingRay!.dx - center.dx, pendingRay!.dy - center.dy, 0),
+        // Reverse NDC correction
+        final Vector4 screenPoint = Vector4(
+          (pendingRay!.dx - center.dx) / center.dx,
+          (pendingRay!.dy - center.dy) / center.dy,
+          1,
+          1,
         );
 
-        // Test the point if it falls within a triangle
-        if (_pointInTriangle(Vector2(ray.x, ray.y), face)) {
-          rayHitFunc?.call(face);
-          face
-            ..c1 = Colors.green
-            ..c2 = Colors.green
-            ..c3 = Colors.green;
+        // Calculate ray from screen-space click
+        final Vector4 worldPoint = invViewProj * screenPoint;
+
+        if (worldPoint.w != 0) {
+          worldPoint.xyzw /= worldPoint.w;
+        }
+
+        // Test the ray if it falls within a 3D surface (triangle)
+        if (_rayIntersects(worldPoint.xyz, cam._pos, face)) {
+          rayTestResults.add(face);
         }
       }
 
@@ -602,6 +616,11 @@ class _ObjectPainter extends CustomPainter {
     paint.color = color;
     final Vertices v = Vertices(VertexMode.triangles, offsets, colors: colors);
     canvas.drawVertices(v, BlendMode.clear, paint);
+
+    // Emit the closest face hit by the ray test
+    if (rayTestResults.isNotEmpty) {
+      rayHitFunc?.call(rayTestResults.last);
+    }
   }
 
   @override
