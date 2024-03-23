@@ -19,6 +19,17 @@ class Face {
   Color c1 = Colors.white, c2 = Colors.white, c3 = Colors.white;
   Face(this._v1, this._v2, this._v3);
 
+  Face.copy(Face other)
+      : _v1 = Vector3.copy(other._v1),
+        _v2 = Vector3.copy(other._v2),
+        _v3 = Vector3.copy(other._v3),
+        _cachedNormal = other._cachedNormal != null
+            ? Vector3.copy(other._cachedNormal!)
+            : null,
+        c1 = other.c1,
+        c2 = other.c2,
+        c3 = other.c3;
+
   void setColors(Color c1, Color c2, Color c3) {
     this.c1 = c1;
     this.c2 = c2;
@@ -36,6 +47,10 @@ class Face {
 
   Vector3 get v3 {
     return _v3;
+  }
+
+  double get avgZ {
+    return (_v1.z + _v2.z + _v3.z) / 3.0;
   }
 
   /// setters - invalidate normal cache
@@ -64,6 +79,38 @@ class Face {
     _cachedNormal = p.cross(q).normalized();
 
     return Vector3.copy(_cachedNormal!);
+  }
+
+  /// Misc. functions to appear iterable and reduce refactoring
+  int get length {
+    return 3;
+  }
+
+  Vector3 operator [](int index) {
+    assert(index < 3, 'Face only has 3 elements!');
+
+    if (index == 0) return _v1;
+    if (index == 1) return _v2;
+
+    //else
+    return _v3;
+  }
+
+  operator []=(int index, Vector3 rhs) {
+    assert(index < 3, 'Face only has 3 elements!');
+
+    if (index == 0) {
+      _v1 = rhs;
+      return;
+    }
+
+    if (index == 1) {
+      _v2 = rhs;
+      return;
+    }
+
+    // else
+    _v3 = rhs;
   }
 }
 
@@ -282,16 +329,16 @@ class _Object3DState extends State<Object3D> {
   double _deltaX = 0.0, _deltaY = 0.0;
   Offset? _pendingRay;
   List<Vector3> vertices = <Vector3>[];
-  List<List<int>> faces = <List<int>>[];
+  List<List<int>> faceIdx = <List<int>>[];
   late Timer _updateTimer;
 
   @override
   void initState() {
     if (widget.path != null) {
-      // Load the object file from assets
+      // Load the object file from assets.
       rootBundle.loadString(widget.path!).then(_parseObj);
     } else if (widget.object != null) {
-      // Load the object from a string
+      // Load the object from a string.
       _parseObj(widget.object!);
     }
 
@@ -325,13 +372,13 @@ class _Object3DState extends State<Object3D> {
   /// Parse the object file.
   void _parseObj(String obj) {
     final List<Vector3> vertices = <Vector3>[];
-    final List<List<int>> faces = <List<int>>[];
+    final List<List<int>> faceIdx = <List<int>>[];
     final List<String> lines = obj.split('\n');
     for (String line in lines) {
       const String space = ' ';
       line = line.replaceAll(RegExp(r'\s+'), space);
 
-      // Split into tokens and drop empty tokens
+      // Split into tokens and drop empty tokens.
       final List<String> chars = line
           .split(space)
           .where((String v) => v.isNotEmpty)
@@ -352,12 +399,12 @@ class _Object3DState extends State<Object3D> {
         for (int i = 1; i < chars.length; i++) {
           face.add(int.parse(chars[i].split('/')[0]));
         }
-        faces.add(face);
+        faceIdx.add(face);
       }
     }
     setState(() {
       this.vertices = vertices;
-      this.faces = faces;
+      this.faceIdx = faceIdx;
     });
   }
 
@@ -374,13 +421,13 @@ class _Object3DState extends State<Object3D> {
     _previousX = data.globalPosition.dx;
   }
 
-  // Invalidates _previousX and _previousY
+  // Invalidates _previousX and _previousY.
   void _handlePanEnd(DragEndDetails _) {
     _previousX = null;
     _previousY = null;
   }
 
-  // Queues a 2D point for casting and testing a ray in the next repaint
+  // Queues a 2D point for casting and testing a ray in the next repaint.
   void _handleRayTestStart(TapDownDetails data) {
     _pendingRay = data.localPosition;
   }
@@ -412,7 +459,7 @@ class _Object3DState extends State<Object3D> {
             roll: 0,
             vertices: vertices,
             color: widget.color,
-            faces: faces,
+            faces: faceIdx,
             faceColorFunc: widget.faceColorFunc,
             rayHitFunc: _forwardRayHit,
             pendingRay: _pendingRay,
@@ -424,10 +471,10 @@ class _Object3DState extends State<Object3D> {
 }
 
 class _ObjectPainter extends CustomPainter {
-  /// Fundamentally, the 3D object's model matrix parts
+  /// Fundamentally, the 3D object's model matrix parts.
   final double pitch, yaw, roll, modelScale;
 
-  /// The calculated model matrix for reverse projection later
+  /// The calculated model matrix for reverse projection later.
   final Matrix4 mat = Matrix4.identity();
 
   final Color color;
@@ -466,26 +513,20 @@ class _ObjectPainter extends CustomPainter {
   }
 
   /// Calculate the 2D-positions of a vertex in the 3D space.
-  List<Offset> _drawFace(List<Vector3> vertices, List<int> face) {
-    final List<Offset> coordinates = <Offset>[];
-    for (int i = 0; i < face.length; i++) {
-      Vector3 iV;
-      if (i < face.length - 1) {
-        iV = vertices[face[i + 1] - 1];
-      } else {
-        iV = vertices[face[0] - 1];
-      }
+  Face _clipSpace(Face input, Matrix4 viewProj, Offset center) {
+    final Face out = Face.copy(input);
 
-      final Offset center = cam.viewPort.center(Offset.zero);
-      final Matrix4 vp = cam.proj * cam.view;
-      final Vector4 v = vp * Vector4(iV.x, iV.y, iV.z, 1.0);
+    for (int i = 0; i < out.length; i++) {
+      final Vector3 iV = out[i];
+      final Vector4 v = viewProj * Vector4(iV.x, iV.y, iV.z, 1.0);
 
-      final double x = ((v.x / v.w) * center.dx);
-      final double y = ((v.y / v.w) * center.dy);
+      final double x = (v.x / v.w) * center.dx;
+      final double y = (v.y / v.w) * center.dy;
+      final double z = v.z / v.w;
 
-      coordinates.add(Offset(x, y) + center);
+      out[i] = Vector3(x + center.dx, y + center.dy, z);
     }
-    return coordinates;
+    return out;
   }
 
   /// Calculate the color of a vertex based on the
@@ -503,22 +544,6 @@ class _ObjectPainter extends CustomPainter {
     );
     face.setColors(c, c, c);
     return face;
-  }
-
-  /// Order vertices by the distance to the camera.
-  /// TODO: use camera
-  List<AvgZ> _sortVertices(List<Vector3> vertices) {
-    final List<AvgZ> avgOfZ = <AvgZ>[];
-    for (int i = 0; i < faces.length; i++) {
-      final List<int> face = faces[i];
-      double z = 0.0;
-      for (final int i in face) {
-        z += vertices[i - 1].z;
-      }
-      avgOfZ.add(AvgZ(i, z));
-    }
-    avgOfZ.sort((AvgZ a, AvgZ b) => a.z.compareTo(b.z));
-    return avgOfZ;
   }
 
   bool _rayIntersects(Vector3 from, Vector3 to, Face face) {
@@ -548,44 +573,31 @@ class _ObjectPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     // Calculate the position of the vertices in the 3D space.
     final List<Vector3> verticesToDraw =
-        vertices.map<Vector3>((Vector3 e) => mat * Vector3.copy(e)).toList();
-
-    // Order vertices by the distance to the camera.
-    final List<AvgZ> avgOfZ = _sortVertices(verticesToDraw);
+        vertices.map<Vector3>((Vector3 e) => mat * e).toList();
 
     // Used for mouse reprojection later
     final Offset center = cam.viewPort.center(Offset.zero);
-    final Matrix4 invViewProj = Matrix4.zero()
-      ..copyInverse(cam.proj * cam.view);
+    final Matrix4 viewProj = cam.proj * cam.view;
+    final Matrix4 invViewProj = Matrix4.zero()..copyInverse(viewProj);
 
     // Calculate the position of the vertices in the 2D space
     // and calculate the colors of the vertices.
-    final List<Offset> offsets = <Offset>[];
-    final List<Color> colors = <Color>[];
+    final List<Face> clipFaces = <Face>[];
     final List<Face> rayTestResults = <Face>[];
 
     for (int i = 0; i < faces.length; i++) {
-      final List<int> faceIdx = faces[avgOfZ[i].index];
+      final List<int> faceIdx = faces[i];
+      final Vector3 v1 = verticesToDraw[faceIdx[0] - 1];
+      final Vector3 v2 = verticesToDraw[faceIdx[1] - 1];
+      final Vector3 v3 = verticesToDraw[faceIdx[2] - 1];
 
-      // Allocate list with a fixed size of 3
-      final List<Vector3> verts =
-          List<Vector3>.filled(3, Vector3.zero(), growable: false);
+      Face face = Face(v1, v2, v3);
 
-      verts[0] = verticesToDraw[faceIdx[0] - 1];
-      verts[1] = verticesToDraw[faceIdx[1] - 1];
-      verts[2] = verticesToDraw[faceIdx[2] - 1];
-
-      Face face = Face(
-        verts[0],
-        verts[1],
-        verts[2],
-      );
-
-      // Fallback on default color func if a custom one is not provided
+      // Fallback on default color func if a custom one is not provided.
       face = faceColorFunc?.call(face) ?? _defaultFaceColor(face);
 
       if (pendingRay != null) {
-        // Reverse NDC correction
+        // Reverse NDC correction.
         final Vector4 screenPoint = Vector4(
           (pendingRay!.dx - center.dx) / center.dx,
           (pendingRay!.dy - center.dy) / center.dy,
@@ -593,31 +605,50 @@ class _ObjectPainter extends CustomPainter {
           1,
         );
 
-        // Calculate ray from screen-space click
+        // Calculate ray from screen-space point.
         final Vector4 worldPoint = invViewProj * screenPoint;
 
         if (worldPoint.w != 0) {
           worldPoint.xyzw /= worldPoint.w;
         }
 
-        // Test the ray if it falls within a 3D surface (triangle)
+        // Test the ray if it falls within a 3D surface (triangle).
         if (_rayIntersects(worldPoint.xyz, cam._pos, face)) {
           rayTestResults.add(face);
         }
       }
 
-      colors.addAll(<Color>[face.c1, face.c2, face.c3]);
-      offsets.addAll(_drawFace(verticesToDraw, faceIdx));
+      clipFaces.add(_clipSpace(face, viewProj, center));
     }
 
-    // Emit the closest face hit by the ray test
+    // Emit the closest face hit by the ray test.
     if (rayTestResults.isNotEmpty) {
       // If set this function can change the color of the face
-      // or use it in some other computation
+      // or use it in some other computation.
       rayHitFunc?.call(rayTestResults.last);
     }
 
+    // Order points by the distance to the camera.
+    // TODO: this is so slow!
+    clipFaces.sort((Face a, Face b) => a.avgZ.compareTo(b.avgZ));
+
+    // Extract the colors from the faces.
+    final List<Color> colors = clipFaces.fold(
+      <Color>[], // initial value
+      (List<Color> prev, Face e) => prev..addAll(<Color>[e.c1, e.c2, e.c3]),
+    );
+
     // Draw the vertices.
+    final List<Offset> offsets = clipFaces.fold(
+      <Offset>[],
+      (List<Offset> prev, Face e) => prev
+        ..addAll(<Offset>[
+          Offset(e.v1.x, e.v1.y),
+          Offset(e.v2.x, e.v2.y),
+          Offset(e.v3.x, e.v3.y),
+        ]),
+    ).toList();
+
     final Paint paint = Paint();
     paint.style = PaintingStyle.fill;
     paint.color = color;
@@ -635,11 +666,4 @@ class _ObjectPainter extends CustomPainter {
       old.pitch != pitch ||
       old.yaw != yaw ||
       old.roll != roll;
-}
-
-class AvgZ {
-  int index;
-  double z;
-
-  AvgZ(this.index, this.z);
 }

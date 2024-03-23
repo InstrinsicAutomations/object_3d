@@ -39,6 +39,8 @@ class _MyHomePageState extends State<MyHomePage> {
       Camera(viewPort: Size(400, 400), fov: 45.0, near: 10, far: 1000)
         ..warp(Vector3(0.0, 0.0, -200.0));
 
+  Face? clicked;
+
   late final FocusNode focusNode;
 
   // tracks keyboard keys
@@ -47,7 +49,7 @@ class _MyHomePageState extends State<MyHomePage> {
   // (uncomment line in Object3D constructor)
   // ignore: unused_element
   Face _fresnel(Face face) {
-    final color = Colors.blue;
+    final color = clicked == face ? Colors.red : Colors.blue;
     final light = Vector3(0.0, 0.0, 100.0).normalized();
     double ln1 = light.dot(face.normal);
     double s1 = 1.0 + face.v1.normalized().dot(face.normal);
@@ -60,6 +62,7 @@ class _MyHomePageState extends State<MyHomePage> {
         (color.green + math.pow(s2, power).round()).clamp(0, 255),
         (color.blue + math.pow(s3, power).round()).clamp(0, 255),
         1.0 - ln1.abs());
+
     return face..setColors(c, c, c);
   }
 
@@ -100,7 +103,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   void _handleRayHit(Face face) {
-    print("Face was ${face.v1}, ${face.v2}, ${face.v3}");
+    clicked = face;
   }
 
   @override
@@ -134,7 +137,7 @@ class _MyHomePageState extends State<MyHomePage> {
             color: Colors.blue,
             onTick: _handleFrameTick,
             onRayHit: _handleRayHit,
-            faceColorFunc: _fresnel, // uncomment to see in action
+            //faceColorFunc: _fresnel, // uncomment to see in action
           ),
         ),
       ),
