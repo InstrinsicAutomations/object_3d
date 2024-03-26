@@ -53,6 +53,10 @@ class Face {
     return (_v1.z + _v2.z + _v3.z) / 3.0;
   }
 
+  List<Color> get colors {
+    return <Color>[c1, c2, c3];
+  }
+
   /// setters - invalidate normal cache
   set v1(Vector3 v) {
     _cachedNormal = null;
@@ -328,8 +332,7 @@ class _Object3DState extends State<Object3D> {
   double? _previousX, _previousY;
   double _deltaX = 0.0, _deltaY = 0.0;
   Offset? _pendingRay;
-  List<Vector3> vertices = <Vector3>[];
-  List<List<int>> faceIdx = <List<int>>[];
+  List<Face> faces = <Face>[];
   late Timer _updateTimer;
 
   @override
@@ -373,6 +376,7 @@ class _Object3DState extends State<Object3D> {
   void _parseObj(String obj) {
     final List<Vector3> vertices = <Vector3>[];
     final List<List<int>> faceIdx = <List<int>>[];
+    final List<Face> faces = <Face>[];
     final List<String> lines = obj.split('\n');
     for (String line in lines) {
       const String space = ' ';
@@ -402,9 +406,17 @@ class _Object3DState extends State<Object3D> {
         faceIdx.add(face);
       }
     }
+
+    for (int i = 0; i < faceIdx.length; i++) {
+      final List<int> verts = faceIdx[i];
+      final Vector3 v1 = vertices[verts[0] - 1];
+      final Vector3 v2 = vertices[verts[1] - 1];
+      final Vector3 v3 = vertices[verts[2] - 1];
+      faces.add(Face(v1, v2, v3));
+    }
+
     setState(() {
-      this.vertices = vertices;
-      this.faceIdx = faceIdx;
+      this.faces = faces;
     });
   }
 
@@ -457,9 +469,8 @@ class _Object3DState extends State<Object3D> {
             pitch: _pitch,
             yaw: _yaw,
             roll: 0,
-            vertices: vertices,
             color: widget.color,
-            faces: faceIdx,
+            faces: faces,
             faceColorFunc: widget.faceColorFunc,
             rayHitFunc: _forwardRayHit,
             pendingRay: _pendingRay,
@@ -478,15 +489,16 @@ class _ObjectPainter extends CustomPainter {
   final Matrix4 mat = Matrix4.identity();
 
   final Color color;
-
-  final List<Vector3> vertices;
-  final List<List<int>> faces;
-
+  final List<Face> faces;
   final Camera cam;
 
   final FaceColorFunc? faceColorFunc;
   final RayHitFunc? rayHitFunc;
   final Offset? pendingRay;
+
+  late final List<Face?> clipFaces;
+  late final List<Color> clipColors;
+  late final List<Offset> clipOffsets;
 
   _ObjectPainter({
     required this.cam,
@@ -494,7 +506,6 @@ class _ObjectPainter extends CustomPainter {
     required this.pitch,
     required this.yaw,
     required this.roll,
-    required this.vertices,
     required this.color,
     required this.faces,
     this.faceColorFunc,
@@ -505,6 +516,26 @@ class _ObjectPainter extends CustomPainter {
     mat.rotateX(_degreeToRadian(pitch));
     mat.rotateY(_degreeToRadian(yaw));
     mat.rotateZ(_degreeToRadian(roll));
+
+    // Allocate enough space for clip values
+    clipFaces = List<Face?>.generate(
+      faces.length,
+      (int index) => null,
+      growable: false,
+    );
+
+    clipColors = List<Color>.generate(
+      faces.length * 3,
+      (int _) => Colors.black,
+      growable: false,
+    );
+
+    // Draw the vertices.
+    clipOffsets = List<Offset>.generate(
+      faces.length * 3,
+      (int _) => Offset.zero,
+      growable: false,
+    );
   }
 
   /// Convert degree to radian.
@@ -513,16 +544,22 @@ class _ObjectPainter extends CustomPainter {
   }
 
   /// Calculate the 2D-positions of a vertex in the 3D space.
-  Face _clipSpace(Face input, Matrix4 viewProj, Offset center) {
+  Face? _clipSpace(Face input, Matrix4 viewProj, Offset center) {
     final Face out = Face.copy(input);
 
     for (int i = 0; i < out.length; i++) {
       final Vector3 iV = out[i];
       final Vector4 v = viewProj * Vector4(iV.x, iV.y, iV.z, 1.0);
+      final double w = v.w;
 
-      final double x = (v.x / v.w) * center.dx;
-      final double y = (v.y / v.w) * center.dy;
-      final double z = v.z / v.w;
+      // Outside of frustum. Discard.
+      if (v.x < -w || v.x > w || v.y < -w || v.y > w || v.z < -w || v.z > w) {
+        return null;
+      }
+
+      final double x = (v.x / w) * center.dx;
+      final double y = (v.y / w) * center.dy;
+      final double z = v.z / w;
 
       out[i] = Vector3(x + center.dx, y + center.dy, z);
     }
@@ -571,30 +608,27 @@ class _ObjectPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Calculate the position of the vertices in the 3D space.
-    final List<Vector3> verticesToDraw =
-        vertices.map<Vector3>((Vector3 e) => mat * e).toList();
-
     // Used for mouse reprojection later
     final Offset center = cam.viewPort.center(Offset.zero);
     final Matrix4 viewProj = cam.proj * cam.view;
     final Matrix4 invViewProj = Matrix4.zero()..copyInverse(viewProj);
 
-    // Calculate the position of the vertices in the 2D space
-    // and calculate the colors of the vertices.
-    final List<Face> clipFaces = <Face>[];
+    // Growble list for potential geometry to ray-test
     final List<Face> rayTestResults = <Face>[];
 
-    for (int i = 0; i < faces.length; i++) {
-      final List<int> faceIdx = faces[i];
-      final Vector3 v1 = verticesToDraw[faceIdx[0] - 1];
-      final Vector3 v2 = verticesToDraw[faceIdx[1] - 1];
-      final Vector3 v3 = verticesToDraw[faceIdx[2] - 1];
+    // Track how many faces are actually drawn
+    int faceLen = 0;
 
-      Face face = Face(v1, v2, v3);
+    for (int i = 0; i < faces.length; i++) {
+      final Face face = Face.copy(faces[i]);
+
+      // Apply world transformation on face
+      face[0] = mat * face[0];
+      face[1] = mat * face[1];
+      face[2] = mat * face[2];
 
       // Fallback on default color func if a custom one is not provided.
-      face = faceColorFunc?.call(face) ?? _defaultFaceColor(face);
+      faceColorFunc?.call(face) ?? _defaultFaceColor(face);
 
       if (pendingRay != null) {
         // Reverse NDC correction.
@@ -618,7 +652,11 @@ class _ObjectPainter extends CustomPainter {
         }
       }
 
-      clipFaces.add(_clipSpace(face, viewProj, center));
+      final Face? out = _clipSpace(face, viewProj, center);
+
+      if (out == null) continue;
+
+      clipFaces[faceLen++] = out;
     }
 
     // Emit the closest face hit by the ray test.
@@ -630,30 +668,30 @@ class _ObjectPainter extends CustomPainter {
 
     // Order points by the distance to the camera.
     // TODO: this is so slow!
-    clipFaces.sort((Face a, Face b) => a.avgZ.compareTo(b.avgZ));
+    /*clipFaces.sort((Face? a, Face? b) {
+      if (b == null) return a?.avgZ.floor() ?? 0;
+      if (a == null) return -b.avgZ.floor();
 
-    // Extract the colors from the faces.
-    final List<Color> colors = clipFaces.fold(
-      <Color>[], // initial value
-      (List<Color> prev, Face e) => prev..addAll(<Color>[e.c1, e.c2, e.c3]),
-    );
+      return a.avgZ.compareTo(b.avgZ);
+    });*/
 
-    // Draw the vertices.
-    final List<Offset> offsets = clipFaces.fold(
-      <Offset>[],
-      (List<Offset> prev, Face e) => prev
-        ..addAll(<Offset>[
-          Offset(e.v1.x, e.v1.y),
-          Offset(e.v2.x, e.v2.y),
-          Offset(e.v3.x, e.v3.y),
-        ]),
-    ).toList();
+    // Extract the final colors and verts from the faces.
+    final int dataLen = faceLen * 3;
+    for (int i = 0; i < dataLen; i++) {
+      final Face face = clipFaces[i ~/ 3]!;
+      final int idx = i % 3;
+      clipColors[i] = face.colors[idx];
+
+      final Vector3 vert = face[idx];
+      clipOffsets[i] = Offset(vert.x, vert.y);
+    }
 
     final Paint paint = Paint();
     paint.style = PaintingStyle.fill;
     paint.color = color;
-    final Vertices v = Vertices(VertexMode.triangles, offsets, colors: colors);
-    canvas.drawVertices(v, BlendMode.clear, paint);
+    final Vertices v =
+        Vertices(VertexMode.triangles, clipOffsets, colors: clipColors);
+    canvas.drawVertices(v, BlendMode.srcOver, paint);
   }
 
   @override
@@ -661,7 +699,6 @@ class _ObjectPainter extends CustomPainter {
       old.cam != cam ||
       old.cam.needsRedraw ||
       old.modelScale != modelScale ||
-      old.vertices != vertices ||
       old.faces != faces ||
       old.pitch != pitch ||
       old.yaw != yaw ||
