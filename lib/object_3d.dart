@@ -6,11 +6,32 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 import 'package:vector_math/vector_math_64.dart' show Vector3, Vector4, Matrix4;
 
 typedef FaceColorFunc = Face Function(Face face);
 typedef TickFunc = void Function(Timer timer);
 typedef RayHitFunc = void Function(Face face);
+
+/// Simple widget that wraps the provider and consumer
+class Object3D extends StatelessWidget {
+  final Object3DController controller;
+
+  const Object3D({required this.controller, super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return ChangeNotifierProvider<_Provider>(
+      create: (BuildContext context) => _Provider(controller),
+      child: _Canvas(key: key, controller),
+    );
+  }
+}
+
+/// Convert degree to radian.
+double _degreeToRadian(double degree) {
+  return degree * (math.pi / 180.0);
+}
 
 /// Represents a face (3 vertices) with color data
 class Face {
@@ -29,6 +50,11 @@ class Face {
         c1 = other.c1,
         c2 = other.c2,
         c3 = other.c3;
+
+  Face.unset()
+      : _v1 = Vector3.zero(),
+        _v2 = Vector3.zero(),
+        _v3 = Vector3.zero();
 
   void setColors(Color c1, Color c2, Color c3) {
     this.c1 = c1;
@@ -130,7 +156,6 @@ class Camera {
   double _fov; // in degrees
   double _near;
   double _far;
-  bool _dirtyView = false;
   bool _dirtyFrustum = false;
 
   Camera({
@@ -163,8 +188,6 @@ class Camera {
       ..setColumn(3, Vector4(eye.x, eye.y, eye.z, 1.0));
     _mat.multiply(p);
     _pos = _mat.getTranslation();
-
-    _dirtyView = true;
   }
 
   /// Reset orientation and position of camera.
@@ -185,8 +208,6 @@ class Camera {
       ..setColumn(3, Vector4(pos.x, pos.y, pos.z, 1.0));
     _mat.multiply(p);
     _pos = _mat.getTranslation();
-
-    _dirtyView = true;
   }
 
   /// Move relative to the camera orientation (negate amount)
@@ -194,29 +215,16 @@ class Camera {
   void move(Vector3 amount) {
     _pos -= (_forward * amount.z) + (_up * amount.y) + (_right * amount.x);
     _mat.setTranslation(_pos);
-    _dirtyView = true;
   }
 
   Matrix4 get view {
     return Matrix4.zero()..copyInverse(_mat);
   }
 
-  bool get needsRedraw {
-    bool redraw = false;
-
-    if (_dirtyView) {
-      redraw = true;
-    }
-
-    if (_dirtyFrustum) {
-      redraw = true;
-      _calculateFrustum(_viewPort, _fov, _near, _far);
-    }
-
-    _dirtyView = false;
+  void update() {
+    if (_dirtyFrustum == false) return;
+    _calculateFrustum(_viewPort, _fov, _near, _far);
     _dirtyFrustum = false;
-
-    return redraw;
   }
 
   //
@@ -270,10 +278,9 @@ class Camera {
   }
 }
 
-class Object3D extends StatefulWidget {
-  const Object3D({
+class Object3DController {
+  Object3DController({
     required this.cam,
-    super.key,
     this.color = Colors.white,
     this.object,
     this.path,
@@ -323,60 +330,96 @@ class Object3D extends StatefulWidget {
   final TickFunc? onTick; // Optional callback to perform extra ops on tick
   final RayHitFunc? onRayHit; // Optional callback to perform a ray hit check
 
-  @override
-  State<Object3D> createState() => _Object3DState();
-}
+  /// Fundamentally, the 3D object's model matrix parts.
+  double pitch = 0.0, yaw = 0.0, roll = 0.0;
+  bool needsRedraw = true;
 
-class _Object3DState extends State<Object3D> {
-  double _pitch = 0.0, _yaw = 0.0;
+  /// The final calculated model matrix for reverse projection later.
+  final Matrix4 mat = Matrix4.identity();
+  final List<Face> faces = <Face>[];
+
+  RayHitFunc? rayHitFunc;
+  Offset? pendingRay;
+
+  List<Face> clipFaces = <Face>[];
+  List<Color> clipColors = <Color>[];
+  List<Offset> clipOffsets = <Offset>[];
+
   double? _previousX, _previousY;
   double _deltaX = 0.0, _deltaY = 0.0;
   Offset? _pendingRay;
-  List<Face> faces = <Face>[];
-  late Timer _updateTimer;
 
-  @override
-  void initState() {
-    if (widget.path != null) {
+  bool _ready = false; // If we are ready to draw
+
+  void _init() async {
+    faces.clear();
+
+    if (path != null) {
       // Load the object file from assets.
-      rootBundle.loadString(widget.path!).then(_parseObj);
-    } else if (widget.object != null) {
+      _parseObj(await rootBundle.loadString(path!));
+    } else if (object != null) {
       // Load the object from a string.
-      _parseObj(widget.object!);
+      _parseObj(object!);
     }
 
-    _updateTimer =
-        Timer.periodic(const Duration(milliseconds: 16), (Timer timer) {
-      if (!mounted) return;
-      widget.onTick?.call(timer);
-      setState(() {
-        final double adx = _deltaX.abs();
-        final double ady = _deltaY.abs();
-        final int sx = _deltaX < 0 ? -1 : 1;
-        final int sy = _deltaY < 0 ? -1 : 1;
+    // Allocate enough space for clip values
+    clipFaces = List<Face>.generate(
+      faces.length,
+      (int index) => Face.unset(),
+      growable: false,
+    );
 
-        _deltaX = math.min(widget.maxSpeed, adx) * sx * widget.dampCoef;
-        _deltaY = math.min(widget.maxSpeed, ady) * sy * widget.dampCoef;
+    clipColors = List<Color>.generate(
+      faces.length * 3,
+      (int _) => Colors.black,
+      growable: false,
+    );
 
-        _yaw = _yaw - (_deltaX * (widget.reversePitch ? -1 : 1));
-        _pitch = _pitch - (_deltaY * (widget.reverseYaw ? -1 : 1));
-      });
-    });
+    // Draw the vertices.
+    clipOffsets = List<Offset>.generate(
+      faces.length * 3,
+      (int _) => Offset.zero,
+      growable: false,
+    );
 
-    super.initState();
+    _recalculateMat();
+
+    _ready = true;
   }
 
-  @override
-  void dispose() {
-    super.dispose();
-    _updateTimer.cancel();
+  /// Recalculate the object's world mat
+  void _recalculateMat() {
+    mat
+      ..setIdentity()
+      ..scale(modelScale, modelScale)
+      ..rotateX(_degreeToRadian(pitch))
+      ..rotateY(_degreeToRadian(yaw))
+      ..rotateZ(_degreeToRadian(roll));
+  }
+
+  void _update() {
+    final double adx = _deltaX.abs();
+    final double ady = _deltaY.abs();
+
+    final int sx = _deltaX < 0 ? -1 : 1;
+    final int sy = _deltaY < 0 ? -1 : 1;
+
+    _deltaX = math.min(maxSpeed, adx) * sx * dampCoef;
+    _deltaY = math.min(maxSpeed, ady) * sy * dampCoef;
+
+    yaw = yaw - (_deltaX * (reversePitch ? -1 : 1));
+    pitch = pitch - (_deltaY * (reverseYaw ? -1 : 1));
+
+    _recalculateMat();
+    cam.update();
+
+    needsRedraw = true;
   }
 
   /// Parse the object file.
   void _parseObj(String obj) {
     final List<Vector3> vertices = <Vector3>[];
     final List<List<int>> faceIdx = <List<int>>[];
-    final List<Face> faces = <Face>[];
     final List<String> lines = obj.split('\n');
     for (String line in lines) {
       const String space = ' ';
@@ -414,21 +457,17 @@ class _Object3DState extends State<Object3D> {
       final Vector3 v3 = vertices[verts[2] - 1];
       faces.add(Face(v1, v2, v3));
     }
-
-    setState(() {
-      this.faces = faces;
-    });
   }
 
   /// Update the angle of rotation based on the change in position.
   void _handlePanDelta(DragUpdateDetails data) {
     if (_previousY != null) {
-      _deltaY += widget.swipeCoef * (_previousY! - data.globalPosition.dy);
+      _deltaY += swipeCoef * (_previousY! - data.globalPosition.dy);
     }
     _previousY = data.globalPosition.dy;
 
     if (_previousX != null) {
-      _deltaX += widget.swipeCoef * (_previousX! - data.globalPosition.dx);
+      _deltaX += swipeCoef * (_previousX! - data.globalPosition.dx);
     }
     _previousX = data.globalPosition.dx;
   }
@@ -444,126 +483,105 @@ class _Object3DState extends State<Object3D> {
     _pendingRay = data.localPosition;
   }
 
-  void _forwardRayHit(Face face) {
-    _pendingRay = null;
-    widget.onRayHit?.call(face);
+  bool _shouldRepaint(Object3DPainter oldDelegate) =>
+      oldDelegate.controller != this || needsRedraw;
+}
+
+class _Provider extends ChangeNotifier {
+  final Object3DController controller;
+  late Timer _updateTimer;
+
+  _Provider(this.controller) {
+    controller._init();
+
+    _updateTimer =
+        Timer.periodic(const Duration(milliseconds: 16), (Timer timer) {
+      if (controller._ready == false) return;
+
+      controller.onTick?.call(timer);
+      controller._update();
+      notifyListeners();
+    });
   }
 
   @override
-  Widget build(BuildContext context) {
-    if (widget.adaptiveViewport) {
-      widget.cam._viewPort = (MediaQuery.of(context).size);
-      widget.cam._dirtyFrustum = true;
-    }
+  void dispose() {
+    _updateTimer.cancel();
+    super.dispose();
+  }
+}
 
+class _Canvas extends StatelessWidget {
+  final Object3DController controller;
+
+  const _Canvas(
+    this.controller, {
+    super.key,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     return GestureDetector(
-      onPanUpdate: _handlePanDelta,
-      onPanEnd: _handlePanEnd,
-      onDoubleTapDown: _handleRayTestStart,
+      onPanUpdate: controller._handlePanDelta,
+      onPanEnd: controller._handlePanEnd,
+      onDoubleTapDown: controller._handleRayTestStart,
       child: ClipRect(
-        child: CustomPaint(
-          size: widget.cam.viewPort,
-          painter: _ObjectPainter(
-            cam: widget.cam,
-            modelScale: widget.modelScale,
-            pitch: _pitch,
-            yaw: _yaw,
-            roll: 0,
-            color: widget.color,
-            faces: faces,
-            faceColorFunc: widget.faceColorFunc,
-            rayHitFunc: _forwardRayHit,
-            pendingRay: _pendingRay,
-          ),
+        child: Consumer<_Provider>(
+          builder: (BuildContext context, _Provider _, Widget? child) {
+            // Test for viewport changes if true
+            if (controller.adaptiveViewport) {
+              final Size newViewPort = (MediaQuery.of(context).size);
+              if (controller.cam._viewPort != newViewPort) {
+                // Change and request perspective mat rebuild
+                controller.cam._viewPort = newViewPort;
+                controller.cam._dirtyFrustum = true;
+              }
+            }
+            return CustomPaint(
+              size: controller.cam.viewPort,
+              painter: Object3DPainter(controller),
+            );
+          },
         ),
       ),
     );
   }
 }
 
-class _ObjectPainter extends CustomPainter {
-  /// Fundamentally, the 3D object's model matrix parts.
-  final double pitch, yaw, roll, modelScale;
+class Object3DPainter extends CustomPainter {
+  final Object3DController controller;
 
-  /// The calculated model matrix for reverse projection later.
-  final Matrix4 mat = Matrix4.identity();
+  final Paint _paint = Paint()..style = PaintingStyle.fill;
+  late final Vertices _verticesToDraw;
 
-  final Color color;
-  final List<Face> faces;
-  final Camera cam;
-
-  final FaceColorFunc? faceColorFunc;
-  final RayHitFunc? rayHitFunc;
-  final Offset? pendingRay;
-
-  late final List<Face?> clipFaces;
-  late final List<Color> clipColors;
-  late final List<Offset> clipOffsets;
-
-  _ObjectPainter({
-    required this.cam,
-    required this.modelScale,
-    required this.pitch,
-    required this.yaw,
-    required this.roll,
-    required this.color,
-    required this.faces,
-    this.faceColorFunc,
-    this.rayHitFunc,
-    this.pendingRay,
-  }) {
-    mat.scale(modelScale, modelScale);
-    mat.rotateX(_degreeToRadian(pitch));
-    mat.rotateY(_degreeToRadian(yaw));
-    mat.rotateZ(_degreeToRadian(roll));
-
-    // Allocate enough space for clip values
-    clipFaces = List<Face?>.generate(
-      faces.length,
-      (int index) => null,
-      growable: false,
+  Object3DPainter(this.controller) {
+    _verticesToDraw = Vertices(
+      VertexMode.triangles,
+      controller.clipOffsets,
+      colors: controller.clipColors,
     );
-
-    clipColors = List<Color>.generate(
-      faces.length * 3,
-      (int _) => Colors.black,
-      growable: false,
-    );
-
-    // Draw the vertices.
-    clipOffsets = List<Offset>.generate(
-      faces.length * 3,
-      (int _) => Offset.zero,
-      growable: false,
-    );
-  }
-
-  /// Convert degree to radian.
-  double _degreeToRadian(double degree) {
-    return degree * (math.pi / 180.0);
   }
 
   /// Calculate the 2D-positions of a vertex in the 3D space.
-  Face? _clipSpace(Face input, Matrix4 viewProj, Offset center) {
-    final Face out = Face.copy(input);
-
-    for (int i = 0; i < out.length; i++) {
-      final Vector3 iV = out[i];
+  bool _clipSpace(Face face, Matrix4 viewProj, Offset center) {
+    for (int i = 0; i < face.length; i++) {
+      final Vector3 iV = face[i];
       final Vector4 v = viewProj * Vector4(iV.x, iV.y, iV.z, 1.0);
       final double w = v.w;
 
       // Outside of frustum. Discard.
       if (v.x < -w || v.x > w || v.y < -w || v.y > w || v.z < -w || v.z > w) {
-        return null;
+        return false;
       }
 
-      final double x = (v.x / w) * center.dx;
-      final double y = (v.y / w) * center.dy;
-      final double z = v.z / w;
+      final double ood = 1.0 / w;
+      final double x = (v.x * ood * center.dx) + center.dx;
+      final double y = (v.y * ood * center.dy) + center.dy;
+      final double z = v.z * ood;
 
-      out[i] = Vector3(x + center.dx, y + center.dy, z);
+      face[i] = Vector3(x, y, z);
     }
-    return out;
+    return true;
   }
 
   /// Calculate the color of a vertex based on the
@@ -574,9 +592,9 @@ class _ObjectPainter extends CustomPainter {
     final double s = face.normal.dot(light);
     final num coefficient = math.max(0, s);
     final Color c = Color.fromRGBO(
-      (color.red * coefficient).round(),
-      (color.green * coefficient).round(),
-      (color.blue * coefficient).round(),
+      (controller.color.red * coefficient).round(),
+      (controller.color.green * coefficient).round(),
+      (controller.color.blue * coefficient).round(),
       1,
     );
     face.setColors(c, c, c);
@@ -608,19 +626,27 @@ class _ObjectPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    if (controller._ready == false) return;
+
     // Used for mouse reprojection later
-    final Offset center = cam.viewPort.center(Offset.zero);
-    final Matrix4 viewProj = cam.proj * cam.view;
+    final Offset center = controller.cam.viewPort.center(Offset.zero);
+    final Matrix4 viewProj = controller.cam.proj * controller.cam.view;
     final Matrix4 invViewProj = Matrix4.zero()..copyInverse(viewProj);
 
-    // Growble list for potential geometry to ray-test
-    final List<Face> rayTestResults = <Face>[];
+    // Respect cache locality
+    final List<Face> clipFaces = controller.clipFaces;
+    final List<Color> clipColors = controller.clipColors;
+    final List<Offset> clipOffsets = controller.clipOffsets;
+    final Matrix4 mat = controller.mat;
+    Face? rayTestResult;
 
     // Track how many faces are actually drawn
+    final int pendingFacesLen = controller.faces.length;
     int faceLen = 0;
+    int backIdx = pendingFacesLen - 1;
 
-    for (int i = 0; i < faces.length; i++) {
-      final Face face = Face.copy(faces[i]);
+    for (int i = 0; i < pendingFacesLen; i++) {
+      final Face face = Face.copy(controller.faces[i]);
 
       // Apply world transformation on face
       face[0] = mat * face[0];
@@ -628,13 +654,13 @@ class _ObjectPainter extends CustomPainter {
       face[2] = mat * face[2];
 
       // Fallback on default color func if a custom one is not provided.
-      faceColorFunc?.call(face) ?? _defaultFaceColor(face);
+      controller.faceColorFunc?.call(face) ?? _defaultFaceColor(face);
 
-      if (pendingRay != null) {
+      if (controller.pendingRay != null) {
         // Reverse NDC correction.
         final Vector4 screenPoint = Vector4(
-          (pendingRay!.dx - center.dx) / center.dx,
-          (pendingRay!.dy - center.dy) / center.dy,
+          (controller.pendingRay!.dx - center.dx) / center.dx,
+          (controller.pendingRay!.dy - center.dy) / center.dy,
           1,
           1,
         );
@@ -647,38 +673,55 @@ class _ObjectPainter extends CustomPainter {
         }
 
         // Test the ray if it falls within a 3D surface (triangle).
-        if (_rayIntersects(worldPoint.xyz, cam._pos, face)) {
-          rayTestResults.add(face);
+        if (_rayIntersects(worldPoint.xyz, controller.cam._pos, face)) {
+          rayTestResult = face;
         }
       }
 
-      final Face? out = _clipSpace(face, viewProj, center);
+      // If this face failed the clip test, hide this face
+      // NOTE: this is faster than rebuilding a new list every paint call
+      if (!_clipSpace(face, viewProj, center)) {
+        final int colorIdx = backIdx * 3;
+        clipColors[colorIdx] = Colors.transparent;
+        clipColors[colorIdx + 1] = Colors.transparent;
+        clipColors[colorIdx + 2] = Colors.transparent;
+        backIdx--;
+        continue;
+      }
 
-      if (out == null) continue;
-
-      clipFaces[faceLen++] = out;
+      // Otherwise, track it
+      final Face out = controller.clipFaces[faceLen++];
+      out
+        ..v1 = face.v1
+        ..v2 = face.v2
+        ..v3 = face.v3
+        ..c1 = face.c1
+        ..c2 = face.c2
+        ..c3 = face.c3;
     }
 
     // Emit the closest face hit by the ray test.
-    if (rayTestResults.isNotEmpty) {
+    if (rayTestResult != null) {
       // If set this function can change the color of the face
       // or use it in some other computation.
-      rayHitFunc?.call(rayTestResults.last);
+      controller.rayHitFunc?.call(rayTestResult);
+
+      // Consumed. Reset for next frame.
+      controller._pendingRay = null;
     }
 
-    // Order points by the distance to the camera.
+    // Order points by the distance to the camera (+Z)
     // TODO: this is so slow!
-    /*clipFaces.sort((Face? a, Face? b) {
-      if (b == null) return a?.avgZ.floor() ?? 0;
-      if (a == null) return -b.avgZ.floor();
-
-      return a.avgZ.compareTo(b.avgZ);
-    });*/
+    ///controller.clipFaces.sort((Face a, Face b) {
+    // return -a.avgZ.compareTo(b.avgZ);
+    //});
 
     // Extract the final colors and verts from the faces.
     final int dataLen = faceLen * 3;
     for (int i = 0; i < dataLen; i++) {
-      final Face face = clipFaces[i ~/ 3]!;
+      final Face face = clipFaces[i ~/ 3];
+
+      // Every face has 3 points with 3 colors
       final int idx = i % 3;
       clipColors[i] = face.colors[idx];
 
@@ -686,21 +729,14 @@ class _ObjectPainter extends CustomPainter {
       clipOffsets[i] = Offset(vert.x, vert.y);
     }
 
-    final Paint paint = Paint();
-    paint.style = PaintingStyle.fill;
-    paint.color = color;
-    final Vertices v =
-        Vertices(VertexMode.triangles, clipOffsets, colors: clipColors);
-    canvas.drawVertices(v, BlendMode.srcOver, paint);
+    _paint.color = controller.color;
+    canvas.drawVertices(_verticesToDraw, BlendMode.srcOver, _paint);
+
+    // Wait until next redraw request
+    controller.needsRedraw = false;
   }
 
   @override
-  bool shouldRepaint(_ObjectPainter old) =>
-      old.cam != cam ||
-      old.cam.needsRedraw ||
-      old.modelScale != modelScale ||
-      old.faces != faces ||
-      old.pitch != pitch ||
-      old.yaw != yaw ||
-      old.roll != roll;
+  bool shouldRepaint(Object3DPainter oldDelegate) =>
+      controller._shouldRepaint(oldDelegate);
 }

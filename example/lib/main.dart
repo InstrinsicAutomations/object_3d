@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:vector_math/vector_math_64.dart' show Vector3;
 import 'package:object_3d/object_3d.dart';
+import 'package:provider/provider.dart';
 
 void main() {
   runApp(const MyApp());
@@ -35,9 +36,11 @@ class MyHomePage extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   // Make a 400x400 viewport with 45 deg FOV, 10 near plane, and 1000 far plane
   // and then place (warp) camera -200 units away from the origin (0,0)
-  Camera myCamera =
+  final Camera myCamera =
       Camera(viewPort: Size(400, 400), fov: 45.0, near: 10, far: 1000)
         ..warp(Vector3(0.0, 0.0, -200.0));
+
+  late final Object3DController controller;
 
   Face? clicked;
 
@@ -110,6 +113,17 @@ class _MyHomePageState extends State<MyHomePage> {
   void initState() {
     super.initState();
     focusNode = FocusNode();
+
+    controller = Object3DController(
+      cam: myCamera,
+      path: "assets/file.obj",
+      modelScale: 100,
+      adaptiveViewport: true,
+      color: Colors.blue,
+      onTick: _handleFrameTick,
+      onRayHit: _handleRayHit,
+      //faceColorFunc: _fresnel, // uncomment to see in action
+    );
   }
 
   @override
@@ -125,22 +139,12 @@ class _MyHomePageState extends State<MyHomePage> {
         title: const Text('Object 3D Example'),
       ),
       body: Center(
-        child: KeyboardListener(
-          focusNode: focusNode,
-          autofocus: true,
-          onKeyEvent: (e) => _keyDown[e.logicalKey] = !(e is KeyUpEvent),
-          child: Object3D(
-            cam: myCamera,
-            path: "assets/file.obj",
-            modelScale: 100,
-            adaptiveViewport: true,
-            color: Colors.blue,
-            onTick: _handleFrameTick,
-            onRayHit: _handleRayHit,
-            //faceColorFunc: _fresnel, // uncomment to see in action
-          ),
-        ),
-      ),
+          child: KeyboardListener(
+        focusNode: focusNode,
+        autofocus: true,
+        onKeyEvent: (e) => _keyDown[e.logicalKey] = !(e is KeyUpEvent),
+        child: Object3D(controller: controller),
+      )),
     );
   }
 }
